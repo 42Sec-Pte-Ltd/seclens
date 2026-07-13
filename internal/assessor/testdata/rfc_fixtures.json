@@ -1,0 +1,344 @@
+{
+  "rfc7208": [
+    {
+      "name": "strict -all pass",
+      "input": "v=spf1 ip4:1.2.3.4 -all",
+      "want": { "status": "pass", "all_qualifier": "-" }
+    },
+    {
+      "name": "softfail ~all warn",
+      "input": "v=spf1 include:_spf.google.com ~all",
+      "want": { "status": "warn", "all_qualifier": "~" }
+    },
+    {
+      "name": "prod regression glued v=spf1include",
+      "input": "v=spf1include:mail.example.com ~all",
+      "want": { "status": "warn", "all_qualifier": "~", "syntax_ok": true }
+    },
+    {
+      "name": "prod regression Agari exists macro",
+      "input": "v=spf1 exists:%{i}._i.%{d}._d.espf.agari.com include:%{d}.33.spf-protect.agari.com -all",
+      "want": { "status": "pass", "all_qualifier": "-" }
+    },
+    {
+      "name": "prod regression Agari include macro domain-spec",
+      "input": "v=spf1 include:%{d}.55.spf-protect.agari.com -all",
+      "want": { "status": "pass", "all_qualifier": "-" }
+    },
+    {
+      "name": "macro include domain-spec valid",
+      "input": "v=spf1 include:%{ir}.%{v}.%{d}.spf.example.com -all",
+      "want": { "status": "pass", "all_qualifier": "-" }
+    },
+    {
+      "name": "missing all fail",
+      "input": "v=spf1 include:foo.com",
+      "want": { "status": "fail" }
+    },
+    {
+      "name": "+all fail",
+      "input": "v=spf1 +all",
+      "want": { "status": "fail", "all_qualifier": "+" }
+    },
+    {
+      "name": "invalid macro PermError",
+      "input": "v=spf1 include:%{d.spf.example.com -all",
+      "want": { "status": "fail" }
+    },
+    {
+      "name": "wrong version v=spf2",
+      "input": "v=spf2 -all",
+      "want": { "status": "fail" }
+    }
+  ],
+  "rfc7489": [
+    {
+      "name": "reject with rua pass",
+      "input": "v=DMARC1; p=reject; rua=mailto:dmarc@example.com",
+      "want": { "status": "pass", "policy": "reject", "syntax_ok": true }
+    },
+    {
+      "name": "p=none warn",
+      "input": "v=DMARC1; p=none; rua=mailto:reports@example.com",
+      "want": { "status": "warn", "policy": "none", "syntax_ok": true }
+    },
+    {
+      "name": "quarantine warn",
+      "input": "v=DMARC1; p=quarantine; pct=25; rua=mailto:foo@bar.com",
+      "want": { "status": "warn", "policy": "quarantine", "syntax_ok": true }
+    },
+    {
+      "name": "missing p= syntax fail",
+      "input": "v=DMARC1; rua=mailto:dmarc@example.com",
+      "want": { "status": "fail", "syntax_ok": false }
+    },
+    {
+      "name": "pct out of range",
+      "input": "v=DMARC1; p=reject; pct=150",
+      "want": { "status": "fail", "syntax_ok": false }
+    },
+    {
+      "name": "case insensitive version",
+      "input": "V=dmarc1; p=reject; rua=mailto:a@b.com",
+      "want": { "status": "pass", "syntax_ok": true }
+    },
+    {
+      "name": "fo and ri tags valid",
+      "input": "v=DMARC1; p=reject; rua=mailto:a@b.com; fo=1; ri=7200",
+      "want": { "status": "pass", "syntax_ok": true }
+    },
+    {
+      "name": "invalid fo tag syntax fail",
+      "input": "v=DMARC1; p=reject; fo=badoption",
+      "want": { "status": "fail", "syntax_ok": false }
+    }
+  ],
+  "rfc6376": [
+    {
+      "name": "google workspace rsa key",
+      "input": "v=DKIM1; k=rsa; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA",
+      "want": { "syntax_ok": true, "version": "DKIM1", "key_type": "rsa", "has_key": true }
+    },
+    {
+      "name": "revoked empty p=",
+      "input": "v=DKIM1; p=",
+      "want": { "syntax_ok": true, "has_key": false, "key_state": "revoked" }
+    },
+    {
+      "name": "test key t=y",
+      "input": "v=DKIM1; t=y; k=rsa; p=abc123",
+      "want": { "syntax_ok": true, "key_state": "test" }
+    },
+    {
+      "name": "prod regression bare p= amazon ses style",
+      "input": "p=MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQC5",
+      "want": { "syntax_ok": true, "has_key": true, "key_type": "rsa" }
+    },
+    {
+      "name": "ed25519 with hash algs",
+      "input": "v=DKIM1; k=ed25519; t=y; h=sha256; p=abc123",
+      "want": { "syntax_ok": true, "key_type": "ed25519" }
+    },
+    {
+      "name": "non-dkim txt rejected",
+      "input": "v=spf1 -all",
+      "want": { "syntax_ok": false, "key_state": "invalid" }
+    },
+    {
+      "name": "empty record",
+      "input": "",
+      "want": { "syntax_ok": false, "key_state": "invalid" }
+    }
+  ],
+  "rfc8460": [
+    {
+      "name": "valid mailto rua",
+      "input": "v=TLSRPTv1; rua=mailto:tlsrpt@example.com;",
+      "want": { "syntax_ok": true, "version": "TLSRPTv1", "rua_count": 1 }
+    },
+    {
+      "name": "mailto and https rua",
+      "input": "v=TLSRPTv1; rua=mailto:a@b.com,https://reports.example.com/tls",
+      "want": { "syntax_ok": true, "rua_count": 2 }
+    },
+    {
+      "name": "wrong version",
+      "input": "v=TLSRPTv0; rua=mailto:a@b.com;",
+      "want": { "syntax_ok": false }
+    },
+    {
+      "name": "no rua tag",
+      "input": "v=TLSRPTv1;",
+      "want": { "syntax_ok": true, "rua_count": 0 }
+    },
+    {
+      "name": "not tlsrpt prefix",
+      "input": "not tlsrpt",
+      "want": { "syntax_ok": false }
+    },
+    {
+      "name": "comma-separated mixed rua",
+      "input": "v=TLSRPTv1; rua=mailto:good@example.com,http://bad.example.com/tls",
+      "want": { "syntax_ok": true, "rua_count": 2 }
+    }
+  ],
+  "rfc8461": [
+    {
+      "name": "valid RFC id timestamp",
+      "kind": "dns_id",
+      "input": "v=STSv1; id=20160831085700Z;",
+      "want": { "id": "20160831085700Z", "id_valid": true }
+    },
+    {
+      "name": "prod regression ISO MTA-STS id",
+      "kind": "dns_id",
+      "input": "v=STSv1; id=2026-06-24T12:00:00Z;",
+      "want": { "id": "2026-06-24T12:00:00Z", "id_valid": false }
+    },
+    {
+      "name": "missing id field",
+      "kind": "dns_id",
+      "input": "v=STSv1;",
+      "want": { "id_valid": false }
+    },
+    {
+      "name": "short alphanumeric id",
+      "kind": "dns_id",
+      "input": "v=STSv1; id=abc;",
+      "want": { "id": "abc", "id_valid": true }
+    },
+    {
+      "name": "enforce policy valid",
+      "kind": "policy",
+      "input": "version: STSv1\nmode: enforce\nmax_age: 86400\nmx: *.example.com\n",
+      "want": { "syntax_ok": true }
+    },
+    {
+      "name": "testing policy valid",
+      "kind": "policy",
+      "input": "version: STSv1\nmode: testing\nmax_age: 86400\nmx: mail.example.com\n",
+      "want": { "syntax_ok": true }
+    },
+    {
+      "name": "mode none without mx",
+      "kind": "policy",
+      "input": "version: STSv1\nmode: none\nmax_age: 60\n",
+      "want": { "syntax_ok": true }
+    },
+    {
+      "name": "bad policy version",
+      "kind": "policy",
+      "input": "version: STSv0\nmode: enforce\nmax_age: 86400\nmx: mail.example.com\n",
+      "want": { "syntax_ok": false }
+    }
+  ],
+  "rfc7672": [
+    {
+      "name": "valid EE SPKI SHA256",
+      "input": "3 1 1 ABCD",
+      "want": { "syntax_ok": true, "usage": 3, "selector": 1, "matching": 1 }
+    },
+    {
+      "name": "prod regression RFC3597 hash format",
+      "input": "\\# 4 03 01 01 ab",
+      "want": { "syntax_ok": true, "usage": 3, "selector": 1, "matching": 1, "assoc": "AB" }
+    },
+    {
+      "name": "spaces in hex normalized",
+      "input": "0 0 1 aa bb cc dd",
+      "want": { "syntax_ok": true, "assoc": "AABBCCDD" }
+    },
+    {
+      "name": "empty rdata",
+      "input": "",
+      "want": { "syntax_ok": false }
+    },
+    {
+      "name": "usage out of range",
+      "input": "4 0 0 abcd",
+      "want": { "syntax_ok": false }
+    },
+    {
+      "name": "selector out of range",
+      "input": "3 2 1 abcd",
+      "want": { "syntax_ok": false }
+    },
+    {
+      "name": "odd hex length",
+      "input": "3 1 1 abc",
+      "want": { "syntax_ok": false }
+    },
+    {
+      "name": "non-hex association data",
+      "input": "3 1 1 abcdzz",
+      "want": { "syntax_ok": false }
+    }
+  ],
+  "rfc4034": [
+    {
+      "name": "cloudflare sample sha256 DS",
+      "input": "2371 13 2 E9D6FAE1DAD409B0EE20831B6B70C03C773E41A8",
+      "kind": "ds",
+      "want": { "syntax_ok": true, "key_tag": 2371, "algorithm": 13, "digest_type": 2 }
+    },
+    {
+      "name": "rsa sha256 DS",
+      "input": "12345 8 2 AABBCCDDEEFF00112233445566778899AABBCCDDEEFF00112233445566778899",
+      "kind": "ds",
+      "want": { "syntax_ok": true, "key_tag": 12345, "algorithm": 8, "digest_type": 2 }
+    },
+    {
+      "name": "sha1 digest deprecated but syntactic",
+      "input": "2371 13 1 ABCDEF0123456789ABCDEF0123456789ABCDEF01",
+      "kind": "ds",
+      "want": { "syntax_ok": true, "digest_type": 1, "digest_deprecated": true }
+    },
+    {
+      "name": "empty DS",
+      "input": "",
+      "kind": "ds",
+      "want": { "syntax_ok": false }
+    },
+    {
+      "name": "too few DS fields",
+      "input": "2371 13 2",
+      "kind": "ds",
+      "want": { "syntax_ok": false }
+    },
+    {
+      "name": "bad digest hex",
+      "input": "2371 13 2 GGHHAABB",
+      "kind": "ds",
+      "want": { "syntax_ok": false }
+    },
+    {
+      "name": "DNSKEY ksk ecdsa present",
+      "input": "257 3 13 AwEAAc6h7Rfk3A1D0u1i0vYrK8mH3uG8o0o0o0o0o0o0o0o0o0o0o0o0o0o0",
+      "kind": "dnskey",
+      "want": { "dnskey_present": true }
+    },
+    {
+      "name": "DNSKEY bad protocol",
+      "input": "257 4 13 AwEAAc6h7Rfk3A1D0u1i0vYrK8mH3uG8o0o0o0o0o0o0o0o0o0o0o0o0o0o0",
+      "kind": "dnskey",
+      "want": { "dnskey_present": false }
+    }
+  ],
+  "rfc7505": [
+    {
+      "name": "valid null MX dot exchange",
+      "input": [{ "pref": 0, "host": "." }],
+      "want": { "valid_null_mx": true, "posture": "NullMXOnly", "violation": "None" }
+    },
+    {
+      "name": "legacy empty host null MX",
+      "input": [{ "pref": 0, "host": "" }],
+      "want": { "valid_null_mx": true, "posture": "NullMXOnly", "violation": "None" }
+    },
+    {
+      "name": "mixed null and real MX",
+      "input": [{ "pref": 0, "host": "." }, { "pref": 10, "host": "mail.example.com" }],
+      "want": { "valid_null_mx": false, "posture": "MixedInvalid", "violation": "MixedMX" }
+    },
+    {
+      "name": "multiple real MX hosts",
+      "input": [{ "pref": 10, "host": "a.example.com" }, { "pref": 20, "host": "b.example.com" }],
+      "want": { "valid_null_mx": false, "posture": "MailEnabled", "violation": "MultipleMX" }
+    },
+    {
+      "name": "wrong null MX preference",
+      "input": [{ "pref": 10, "host": "." }],
+      "want": { "valid_null_mx": false, "violation": "WrongPreference" }
+    },
+    {
+      "name": "no MX records",
+      "input": [],
+      "want": { "valid_null_mx": false, "posture": "NoMX", "violation": "None" }
+    },
+    {
+      "name": "single mail-enabled MX",
+      "input": [{ "pref": 10, "host": "mail.example.com" }],
+      "want": { "valid_null_mx": false, "posture": "MailEnabled", "violation": "WrongPreference" }
+    }
+  ]
+}

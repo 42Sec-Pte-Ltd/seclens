@@ -1,0 +1,30 @@
+# Keep Go modules and GitHub Actions up to date.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - security
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - github-actions
+    # Avoid noisy major jumps until CI has been green on the pinned majors.
+    ignore:
+      - dependency-name: "actions/checkout"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "actions/setup-go"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "github/codeql-action"
+        update-types: ["version-update:semver-major"]
