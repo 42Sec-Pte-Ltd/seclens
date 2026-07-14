@@ -15,8 +15,8 @@ type Report struct {
 	Generated     time.Time
 	IsMailEnabled    bool
 	HasNullMX        bool // RFC 7505: MX set contains a null MX RR (0 .); not equivalent to "no mail"
-	Profile          string // "mail" | "null_mx"
-	NullMXCompliant  bool   // true when Profile=="null_mx" && Score==100
+	Profile          string // "mail" | "null_mx" | "no_mx"
+	NullMXCompliant  bool   // true when no-mail profile fully hardened (score 100)
 	ApplicableMax    int    // sum of applicable check max points (always 100)
 	MXs              []MXRecord
 	Nameservers   []string
@@ -98,6 +98,9 @@ func (r Report) PrintText(w io.Writer) {
 		fmt.Fprintf(tw, "%s\t%s\t%s\n", name, symbol, msg)
 	}
 
+	if r.NullMX != nil {
+		printRow("Null MX", r.NullMX.Status, r.NullMX.Message)
+	}
 	if r.SPF != nil {
 		printRow("SPF", r.SPF.Status, r.SPF.Message)
 	}
@@ -134,6 +137,9 @@ func (r Report) PrintText(w io.Writer) {
 		}
 	}
 
+	if r.NullMX != nil {
+		printIssue(r.NullMX.Issues)
+	}
 	if r.SPF != nil {
 		printIssue(r.SPF.Issues)
 	}
@@ -143,7 +149,6 @@ func (r Report) PrintText(w io.Writer) {
 	if r.MTASTS != nil {
 		printIssue(r.MTASTS.Issues)
 	}
-	// Add more if other results grow Issues fields (DKIM, DANE, etc.)
 
 	if len(r.Errors) > 0 {
 		fmt.Fprintln(w, "\nErrors during assessment:")

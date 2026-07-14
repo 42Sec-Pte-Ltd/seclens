@@ -13,8 +13,9 @@ func TestApplyPostFanInEnrichment_NilReport(t *testing.T) {
 
 func TestApplyPostFanInEnrichment_DANE_DNSSEC(t *testing.T) {
 	r := report.Report{
-		Domain: "example.com",
-		MXs:    []report.MXRecord{{Pref: 10, Host: "mx1.example.com"}, {Pref: 20, Host: "mx2.example.com"}},
+		Domain:        "example.com",
+		IsMailEnabled: true,
+		MXs:           []report.MXRecord{{Pref: 10, Host: "mx1.example.com"}, {Pref: 20, Host: "mx2.example.com"}},
 		DANE: &report.DANEResult{
 			AdvertisedFor: []string{"mx1.example.com"},
 			MXCovered:     true,
@@ -63,14 +64,10 @@ func TestApplyPostFanInEnrichment_DANE_DNSSEC(t *testing.T) {
 	if !strings.Contains(r.MTASTS.RecommendedPolicy, "mx: mx2.example.com") {
 		t.Fatalf("RecommendedPolicy missing mx2: %q", r.MTASTS.RecommendedPolicy)
 	}
-	foundDANEHint := false
 	for _, iss := range r.MTASTS.Issues {
-		if iss == "DANE validation takes precedence over MTA-STS when both apply (RFC 8461 §2)" {
-			foundDANEHint = true
+		if strings.Contains(iss, "DANE validation takes precedence") {
+			t.Fatalf("unexpected DANE precedence issue: %q", iss)
 		}
-	}
-	if !foundDANEHint {
-		t.Fatal("expected MTA-STS/DANE cross-check issue")
 	}
 
 	PopulateCheckScores(&r)
@@ -81,6 +78,7 @@ func TestApplyPostFanInEnrichment_DANE_DNSSEC(t *testing.T) {
 
 func TestApplyPostFanInEnrichment_DANE_DNSSECIncomplete(t *testing.T) {
 	r := report.Report{
+		Profile: "mail",
 		DANE: &report.DANEResult{
 			AdvertisedFor: []string{"mx.example.com"},
 			MXCovered:     true,
@@ -117,8 +115,9 @@ func TestApplyPostFanInEnrichment_DANE_DNSSECIncomplete(t *testing.T) {
 
 func TestApplyPostFanInEnrichment_TLSRPT_Recommend(t *testing.T) {
 	r := report.Report{
-		Domain: "mail.example.org",
-		TLSRPT: &report.TLSRPTResult{Present: true, Status: "pass"},
+		Domain:        "mail.example.org",
+		IsMailEnabled: true,
+		TLSRPT:        &report.TLSRPTResult{Present: true, Status: "pass"},
 	}
 	applyPostFanInEnrichment(&r)
 	want := "v=TLSRPTv1; rua=mailto:tlsrpt@mail.example.org"
@@ -129,8 +128,9 @@ func TestApplyPostFanInEnrichment_TLSRPT_Recommend(t *testing.T) {
 
 func TestApplyPostFanInEnrichment_MTASTS_RecommendInvalidDNSID(t *testing.T) {
 	r := report.Report{
-		Domain: "example.com",
-		MXs:    []report.MXRecord{{Pref: 10, Host: "mx.example.com"}},
+		Domain:        "example.com",
+		IsMailEnabled: true,
+		MXs:           []report.MXRecord{{Pref: 10, Host: "mx.example.com"}},
 		MTASTS: &report.MTASTSResult{
 			DNSAdvertised: true,
 			DNSIDValid:    false,
@@ -151,7 +151,8 @@ func TestApplyPostFanInEnrichment_MTASTS_RecommendInvalidDNSID(t *testing.T) {
 
 func TestApplyPostFanInEnrichment_MTASTS_SkipsNullMXHosts(t *testing.T) {
 	r := report.Report{
-		Domain: "example.com",
+		Domain:        "example.com",
+		IsMailEnabled: true, // mixed MX still mail-enabled
 		MXs: []report.MXRecord{
 			{Pref: 0, Host: "."},
 			{Pref: 10, Host: ""},
@@ -170,7 +171,8 @@ func TestApplyPostFanInEnrichment_MTASTS_SkipsNullMXHosts(t *testing.T) {
 
 func TestApplyPostFanInEnrichment_EnrichCrossChecks_TestingWithoutTLSRPT(t *testing.T) {
 	r := report.Report{
-		Domain: "example.com",
+		Domain:        "example.com",
+		IsMailEnabled: true,
 		MTASTS: &report.MTASTSResult{
 			Status:        "warn",
 			Mode:          "testing",
@@ -193,6 +195,7 @@ func TestApplyPostFanInEnrichment_EnrichCrossChecks_TestingWithoutTLSRPT(t *test
 
 func TestApplyPostFanInEnrichment_EnrichCrossChecks_TestingWithTLSRPT(t *testing.T) {
 	r := report.Report{
+		IsMailEnabled: true,
 		MTASTS: &report.MTASTSResult{
 			Mode:          "testing",
 			DNSAdvertised: true,
@@ -204,31 +207,6 @@ func TestApplyPostFanInEnrichment_EnrichCrossChecks_TestingWithTLSRPT(t *testing
 	for _, iss := range r.MTASTS.Issues {
 		if strings.Contains(iss, "mode=testing without TLS-RPT") {
 			t.Fatalf("unexpected cross-check when TLS-RPT present: %q", iss)
-		}
-	}
-}
-
-func TestApplyPostFanInEnrichment_EnrichMTASTSCrossCheck_NoHintWhenDANEIncomplete(t *testing.T) {
-	r := report.Report{
-		MTASTS: &report.MTASTSResult{
-			Status:        "pass",
-			DNSAdvertised: true,
-			PolicyFetched: true,
-			MXCoverageOK:  true,
-		},
-		DANE: &report.DANEResult{
-			AdvertisedFor:   []string{"mx.example.com"},
-			MXCovered:       true,
-			SyntaxOK:        true,
-			DNSSECValidated: false,
-			Status:          "warn",
-		},
-		DNSSEC: &report.DNSSECResult{DSPresent: true, TLDSupported: true},
-	}
-	applyPostFanInEnrichment(&r)
-	for _, iss := range r.MTASTS.Issues {
-		if strings.Contains(iss, "DANE validation takes precedence") {
-			t.Fatal("DANE precedence hint should not appear without DNSSECValidated")
 		}
 	}
 }
@@ -251,11 +229,38 @@ func TestApplyPostFanInEnrichment_DANEOnly(t *testing.T) {
 
 func TestApplyPostFanInEnrichment_TLSRPTOnly(t *testing.T) {
 	r := report.Report{
-		Domain: "solo.example",
-		TLSRPT: &report.TLSRPTResult{Status: "info"},
+		Domain:        "solo.example",
+		IsMailEnabled: true,
+		TLSRPT:        &report.TLSRPTResult{Status: "info"},
 	}
 	applyPostFanInEnrichment(&r)
 	if r.TLSRPT.RecommendedDNSTXT == "" {
 		t.Fatal("expected TLSRPT recommendation without MTASTS")
+	}
+}
+
+func TestApplyPostFanInEnrichment_NoMailSkipsMTASTSAndTLSRPTRecipes(t *testing.T) {
+	// Domains without inbound mail must not get MTA-STS / TLS-RPT deploy recipes.
+	r := report.Report{
+		Domain:        "nomail.example",
+		IsMailEnabled: false,
+		Profile:       "null_mx",
+		MTASTS: &report.MTASTSResult{
+			Status:            "info",
+			RecommendedPolicy: "version: STSv1\nmode: enforce\n",
+			RecommendedDNSTXT: "v=STSv1; id=stale;",
+		},
+		TLSRPT: &report.TLSRPTResult{
+			Status:            "info",
+			RecommendedDNSTXT: "v=TLSRPTv1; rua=mailto:tlsrpt@nomail.example",
+		},
+	}
+	applyPostFanInEnrichment(&r)
+	if r.MTASTS.RecommendedPolicy != "" || r.MTASTS.RecommendedDNSTXT != "" {
+		t.Fatalf("MTA-STS recommendations should be cleared for no-mail: policy=%q dns=%q",
+			r.MTASTS.RecommendedPolicy, r.MTASTS.RecommendedDNSTXT)
+	}
+	if r.TLSRPT.RecommendedDNSTXT != "" {
+		t.Fatalf("TLS-RPT recommendation should be cleared for no-mail: %q", r.TLSRPT.RecommendedDNSTXT)
 	}
 }

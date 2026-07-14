@@ -82,18 +82,18 @@ func Check(ctx context.Context, req Request, deps Deps) report.MTASTSResult {
 
 	switch policy.mode {
 	case "enforce":
-		idPresent := strings.TrimSpace(res.PolicyID) != ""
-		if res.MXCoverageOK && syntaxOK && (idValid || idPresent) {
+		// Full pass requires RFC 8461 §3.1 ABNF-valid DNS id= (1*32 ALPHA/DIGIT).
+		// id= lives only in the _mta-sts TXT record, not in the policy file (§3.2 / Appendix A).
+		if res.MXCoverageOK && syntaxOK && idValid {
 			res.Status = "pass"
-			if idValid {
-				res.Message = "MTA-STS fully configured (RFC 8461: enforce + MX covered + valid DNS id=)"
-			} else {
-				res.Message = "MTA-STS fully configured (enforce + all MX covered + id aligned)"
-			}
+			res.Message = "MTA-STS fully configured (RFC 8461: enforce + MX covered + valid DNS id=)"
 		} else if !res.MXCoverageOK {
 			res.Status = "warn"
 			res.Issues = append(res.Issues, "mode=enforce but one or more MX hosts are not authorized by the policy mx: lines (RFC 8461 §4.1)")
 			res.Message = "MTA-STS policy does not cover current MX set"
+		} else if !idValid {
+			res.Status = "warn"
+			res.Message = "MTA-STS enforce + MX OK but DNS id= missing or invalid (RFC 8461 §3.1)"
 		} else {
 			res.Status = "warn"
 			res.Message = "MTA-STS enforce mode but configuration incomplete"
@@ -113,10 +113,6 @@ func Check(ctx context.Context, req Request, deps Deps) report.MTASTSResult {
 
 	if !syntaxOK && res.Status == "pass" {
 		res.Status = "warn"
-	}
-	if strings.TrimSpace(res.PolicyID) == "" && res.Status == "pass" {
-		res.Status = "warn"
-		res.Message = "MTA-STS policy fetched but DNS id= is missing"
 	}
 
 	if policy.maxAge > 0 && policy.maxAge < 86400 {

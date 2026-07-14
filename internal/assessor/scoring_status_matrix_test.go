@@ -181,13 +181,13 @@ var scoringStatusMatrix = []struct {
 	},
 	{
 		protocol:   "MTA-STS",
-		name:       "pass invalid DNS id scoring contract",
-		status:     "pass",
-		wantEarned: 15,
+		name:       "warn invalid DNS id policy-fetched tier",
+		status:     "warn",
+		wantEarned: 10,
 		wantMax:    MaxPointsMTASTS,
 		build: func() *report.Report {
 			return &report.Report{MTASTS: &report.MTASTSResult{
-				Status: "pass", DNSAdvertised: true, PolicyFetched: true,
+				Status: "warn", DNSAdvertised: true, PolicyFetched: true,
 				Mode: "enforce", MXCoverageOK: true, DNSIDValid: false, PolicySyntaxOK: true,
 				PolicyID: "2026-06-24T12:00:00Z",
 			}}
@@ -385,6 +385,12 @@ func TestScoringStatusMatrix(t *testing.T) {
 	for _, tc := range scoringStatusMatrix {
 		t.Run(tc.protocol+"/"+tc.name, func(t *testing.T) {
 			r := tc.build()
+			// Scoring unit cases omit MXs; pin profile so empty-MX inference does not flip mail→null_mx.
+			if tc.protocol == "NullMX" {
+				r.Profile = "null_mx"
+			} else if r.Profile == "" {
+				r.Profile = "mail"
+			}
 			PopulateCheckScores(r)
 
 			var earned, max int

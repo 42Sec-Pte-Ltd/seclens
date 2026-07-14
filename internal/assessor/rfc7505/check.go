@@ -40,8 +40,13 @@ func Check(mxs []report.MXRecord) report.NullMXResult {
 		}
 	default:
 		if len(mxs) == 0 {
-			res.Message = "No MX records published"
-			res.Issues = append(res.Issues, "null MX profile requires exactly one MX record (0 .)")
+			res.Message = "No MX records published — choose an option: harden as non-mail, or enable mail"
+			// Dual option: operators must decide whether the domain will receive mail.
+			res.Issues = append(res.Issues,
+				"No MX is published, so receivers have no explicit inbound-mail policy (ambiguous / legacy A-record fallback risk).",
+				"Option 1 — No email planned (recommended default for parking/landing domains): publish a hardened null MX — MX \"0 .\", SPF \"v=spf1 -all\", DMARC \"v=DMARC1; p=reject\" (RFC 7505).",
+				"Option 2 — Email planned: publish real MX records for your provider, then configure SPF (with provider includes + -all), DMARC (start p=none → quarantine → reject), DKIM, and later MTA-STS / TLS-RPT / DANE.",
+			)
 		}
 	}
 	return res

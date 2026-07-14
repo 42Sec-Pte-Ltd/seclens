@@ -2,9 +2,12 @@ package rfc7505
 
 import "seclens/internal/report"
 
-// IsNullMXProfile reports whether MX records qualify for the null_mx scoring profile.
+// IsNullMXProfile reports whether the domain is scored under the null_mx profile.
+// True when no non-null MX exists: a valid RFC 7505 null MX (0 .), an empty MX set,
+// or only null-MX RRs. Domains that accept mail (any real MX) stay on the mail profile.
+// No-mail domains should harden with null MX + SPF -all + DMARC, not MTA-STS/DANE.
 func IsNullMXProfile(mxs []report.MXRecord) bool {
-	return IsValidNullMX(mxs)
+	return !IsMailEnabled(mxs)
 }
 
 // IsMailEnabled reports whether the domain accepts inbound mail per MX records.

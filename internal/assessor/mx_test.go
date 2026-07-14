@@ -54,6 +54,30 @@ func TestMixedMXProfileStaysMail(t *testing.T) {
 	}
 }
 
+func TestThreeProfilesFromMX(t *testing.T) {
+	// Empty MX → no_mx (not null_mx).
+	for _, mxs := range [][]report.MXRecord{nil, {}} {
+		if got := ProfileFromMXs(mxs); got != ProfileNoMX {
+			t.Fatalf("ProfileFromMXs(%v)=%q want %q", mxs, got, ProfileNoMX)
+		}
+	}
+	// Valid null MX only → null_mx.
+	nullOnly := []report.MXRecord{{Pref: 0, Host: "."}}
+	if got := ProfileFromMXs(nullOnly); got != ProfileNullMX {
+		t.Fatalf("ProfileFromMXs(null)=%q want %q", got, ProfileNullMX)
+	}
+	// Real MX → mail.
+	mail := []report.MXRecord{{Pref: 10, Host: "mx.example.com"}}
+	if got := ProfileFromMXs(mail); got != ProfileMail {
+		t.Fatalf("ProfileFromMXs(mail)=%q want %q", got, ProfileMail)
+	}
+	// Mixed → mail (with violation elsewhere).
+	mixed := []report.MXRecord{{Pref: 0, Host: "."}, {Pref: 10, Host: "mx.example.com"}}
+	if got := ProfileFromMXs(mixed); got != ProfileMail {
+		t.Fatalf("ProfileFromMXs(mixed)=%q want %q", got, ProfileMail)
+	}
+}
+
 func TestIsValidNullMX(t *testing.T) {
 	tests := []struct {
 		name string

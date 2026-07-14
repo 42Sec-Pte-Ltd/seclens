@@ -137,11 +137,12 @@ func TestCheckMatrix(t *testing.T) {
 			wantIssues: []string{"could not be fetched"},
 		},
 		{
-			name:       "invalid id= with pass (scoring contract)",
+			name:       "invalid id= blocks pass (RFC 8461 §3.1 ABNF)",
 			txt:        []string{"v=STSv1; id=2026-06-24T12:00:00Z;"},
 			mxHosts:    mxCovered,
 			policyBody: enforcePolicy("*.example.com"),
-			wantStatus: "pass",
+			wantStatus: "warn",
+			wantIssues: []string{"invalid id="},
 			check: func(t *testing.T, res report.MTASTSResult) {
 				t.Helper()
 				if res.DNSIDValid {

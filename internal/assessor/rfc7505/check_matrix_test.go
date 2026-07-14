@@ -38,7 +38,7 @@ func TestCheckMatrix(t *testing.T) {
 			wantStatus:    "fail",
 			wantViolation: ViolationNone.String(),
 			wantPosture:   PostureNoMX,
-			wantIssues:    []string{"exactly one MX record"},
+			wantIssues:    []string{"No MX is published", "Option 1", "Option 2"},
 		},
 		{
 			name:          "no mx empty slice",
@@ -46,7 +46,7 @@ func TestCheckMatrix(t *testing.T) {
 			wantStatus:    "fail",
 			wantViolation: ViolationNone.String(),
 			wantPosture:   PostureNoMX,
-			wantIssues:    []string{"null MX profile requires"},
+			wantIssues:    []string{"Option 1", "hardened null MX", "Option 2", "real MX"},
 		},
 		{
 			name:          "multiple null mx",

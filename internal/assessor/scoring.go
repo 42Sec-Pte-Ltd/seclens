@@ -34,13 +34,24 @@ const dnssecNotApplicableMessage = "DNSSEC not applicable (TLD does not support 
 
 // effectiveProfile returns the scoring profile, inferring from MX records for legacy reports.
 func effectiveProfile(r report.Report) string {
-	if r.Profile == "null_mx" || r.Profile == "mail" {
+	switch r.Profile {
+	case ProfileMail, ProfileNullMX, ProfileNoMX:
 		return r.Profile
 	}
-	if rfc7505.IsValidNullMX(r.MXs) {
-		return "null_mx"
+	// Prefer explicit MX set when present.
+	if len(r.MXs) > 0 {
+		return ProfileFromMXs(r.MXs)
 	}
-	return "mail"
+	if r.HasNullMX {
+		return ProfileNullMX
+	}
+	// Explicit mail-enabled with empty MXs is inconsistent; trust the flag for legacy.
+	if r.IsMailEnabled {
+		return ProfileMail
+	}
+	// Empty MXs and not mail-enabled → no_mx.
+	// Do not promote leftover DKIM/MTASTS/DANE objects to mail (stale history fields).
+	return ProfileNoMX
 }
 
 // nullMXDNSSECApplicable reports whether the DNSSEC bucket applies for null_mx scoring.
@@ -60,7 +71,7 @@ func PopulateCheckScores(r *report.Report) {
 	if r == nil {
 		return
 	}
-	if effectiveProfile(*r) == "null_mx" {
+	if IsNoMailProfile(*r) {
 		populateNullMXCheckScores(r)
 		return
 	}
@@ -126,7 +137,7 @@ func ComputeApplicableMax(r report.Report) int {
 // without performing any new network operations.
 func ComputeScore(r report.Report) int {
 	var earned int
-	if effectiveProfile(r) == "null_mx" {
+	if IsNoMailProfile(r) {
 		earned = scoreNullMXProfile(r)
 	} else {
 		earned = scoreMailProfile(r)

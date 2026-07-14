@@ -134,11 +134,11 @@ var statusContractCases = []struct {
 	},
 	{
 		protocol: "MTA-STS",
-		name:     "pass enforce mode (invalid DNS id scoring contract)",
-		status:   "pass",
+		name:     "warn enforce mode (invalid DNS id RFC 8461 §3.1)",
+		status:   "warn",
 		fields: map[string]any{
 			"DNSAdvertised": true, "PolicyFetched": true, "Mode": "enforce", "MXCoverageOK": true,
-			"DNSIDValid": false, "PolicySyntaxOK": true,
+			"DNSIDValid": false, "PolicySyntaxOK": true, "PolicyID": "2026-06-24T12:00:00Z",
 		},
 	},
 	{

@@ -140,8 +140,9 @@ func TestNullMXCompliant(t *testing.T) {
 
 func TestPopulateCheckScoresAllSevenChecks(t *testing.T) {
 	r := report.Report{
-		SPF:    &report.SPFResult{Present: true, Status: "pass", AllQualifier: "-", LookupCount: 3},
-		DMARC:  &report.DMARCResult{Policy: "reject", Status: "pass", SyntaxOK: true},
+		Profile: "mail",
+		SPF:     &report.SPFResult{Present: true, Status: "pass", AllQualifier: "-", LookupCount: 3},
+		DMARC:   &report.DMARCResult{Policy: "reject", Status: "pass", SyntaxOK: true},
 		DKIM: &report.DKIMResult{
 			Status:         "pass",
 			SelectorsFound: []string{"s1", "s2"},
@@ -201,7 +202,7 @@ func TestPopulateCheckScoresAndComputeScore(t *testing.T) {
 		RedirectDepth:        4,
 		EffectiveLookupCount: 1,
 	}
-	r := report.Report{SPF: spf}
+	r := report.Report{Profile: "mail", SPF: spf}
 	PopulateCheckScores(&r)
 
 	if spf.EarnedPoints != 20 {
@@ -377,18 +378,18 @@ func TestScoreMTASTS(t *testing.T) {
 			earned: 10,
 		},
 		{
-			name: "invalid DNS id pass scoring contract",
+			name: "invalid DNS id warn policy-fetched tier",
 			mtasts: &report.MTASTSResult{
 				DNSAdvertised: true,
 				PolicyFetched: true,
-				Status:        "pass",
+				Status:        "warn",
 				DNSIDValid:    false,
 				PolicyID:      "2026-06-24T12:00:00Z",
 				Mode:          "enforce",
 				MXCoverageOK:  true,
 				PolicySyntaxOK: true,
 			},
-			earned: 15,
+			earned: 10,
 		},
 		{
 			name: "invalid DNS id testing warn tier",
@@ -571,7 +572,7 @@ func TestSPFRedirectScoringLeniency(t *testing.T) {
 		RedirectDepth:        4,
 		EffectiveLookupCount: 1,
 	}
-	r := report.Report{SPF: res}
+	r := report.Report{Profile: "mail", SPF: res}
 	score := ComputeScore(r)
 	if score != 20 {
 		t.Errorf("expected SPF contrib 20 (full lookup bonus via redirect leniency), got total %d", score)
@@ -585,8 +586,9 @@ func TestSPFRedirectScoringLeniency(t *testing.T) {
 
 func TestComputeScoreCapsAt100(t *testing.T) {
 	r := report.Report{
-		SPF:    &report.SPFResult{Present: true, Status: "pass", AllQualifier: "-", LookupCount: 1},
-		DMARC:  &report.DMARCResult{Policy: "reject", SyntaxOK: true},
+		Profile: "mail",
+		SPF:     &report.SPFResult{Present: true, Status: "pass", AllQualifier: "-", LookupCount: 1},
+		DMARC:   &report.DMARCResult{Policy: "reject", SyntaxOK: true},
 		DKIM: &report.DKIMResult{
 			SelectorsFound: []string{"s1"},
 			Keys:           []report.DKIMKeyRecord{{Selector: "s1", SyntaxOK: true}},

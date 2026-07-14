@@ -55,18 +55,25 @@ func Assess(ctx context.Context, domain string, opts AssessmentOpts) (report.Rep
 		Generated: time.Now().UTC(),
 	}
 
-	// MX first: mail vs null_mx profile and hosts for DKIM/MTA-STS/DANE.
-	mxs, _ := DefaultClient.LookupMX(ctx, domain)
-	r.MXs = mxs
-	r.HasNullMX = HasNullMX(mxs)
-	r.Profile = ProfileMail
-	if rfc7505.IsNullMXProfile(mxs) {
-		r.Profile = ProfileNullMX
-	}
-	r.IsMailEnabled = rfc7505.IsMailEnabled(mxs)
-	if r.Profile == ProfileMail && r.HasNullMX && !rfc7505.IsValidNullMX(mxs) {
-		if rfc7505.DetectViolation(mxs) == rfc7505.ViolationMixedMX {
-			r.Errors = append(r.Errors, rfc7505.MixedMXViolationMessage)
+	// MX first: mail | null_mx | no_mx profile and hosts for DKIM/MTA-STS/DANE.
+	// A hard LookupMX failure must not be treated as empty MX (no_mx dual-path).
+	mxs, mxErr := DefaultClient.LookupMX(ctx, domain)
+	if mxErr != nil {
+		r.Errors = append(r.Errors, fmt.Sprintf("MX DNS lookup failed: %v", mxErr))
+		r.MXs = nil
+		r.HasNullMX = false
+		r.IsMailEnabled = false
+		// Fail open to mail stack without dual-path "empty MX" guidance.
+		r.Profile = ProfileMail
+	} else {
+		r.MXs = mxs
+		r.HasNullMX = HasNullMX(mxs)
+		r.Profile = ProfileFromMXs(mxs)
+		r.IsMailEnabled = rfc7505.IsMailEnabled(mxs)
+		if r.Profile == ProfileMail && r.HasNullMX && !rfc7505.IsValidNullMX(mxs) {
+			if rfc7505.DetectViolation(mxs) == rfc7505.ViolationMixedMX {
+				r.Errors = append(r.Errors, rfc7505.MixedMXViolationMessage)
+			}
 		}
 	}
 
@@ -122,8 +129,8 @@ func Assess(ctx context.Context, domain string, opts AssessmentOpts) (report.Rep
 		res := result{}
 
 		var cwg sync.WaitGroup
-		if r.Profile == "null_mx" {
-			// Null MX profile: validate null MX, SPF, DMARC, DNSSEC only.
+		if r.Profile == ProfileNoMX || r.Profile == ProfileNullMX {
+			// No MX / Null MX profiles: null MX posture, SPF, DMARC, DNSSEC only (no mail transport).
 			cwg.Add(4)
 			go func() { defer cwg.Done(); res.nullMX = CheckNullMX(mxs) }()
 			go func() { defer cwg.Done(); res.spf = CheckSPF(ctx, domain) }()
@@ -155,7 +162,7 @@ func Assess(ctx context.Context, domain string, opts AssessmentOpts) (report.Rep
 
 	select {
 	case res := <-ch:
-		if r.Profile == "null_mx" {
+		if r.Profile == ProfileNoMX || r.Profile == ProfileNullMX {
 			r.NullMX = &res.nullMX
 			r.SPF = &res.spf
 			r.DMARC = &res.dmarc
@@ -189,6 +196,8 @@ func Assess(ctx context.Context, domain string, opts AssessmentOpts) (report.Rep
 
 // applyPostFanInEnrichment runs cross-check and recommendation steps after parallel
 // protocol checks complete. PopulateCheckScores must run only after this returns.
+// Mail-transport recommendations (MTA-STS / TLS-RPT) only apply when mail is enabled;
+// no-mail domains get hardened null-MX guidance via the null_mx check path instead.
 func applyPostFanInEnrichment(r *report.Report) {
 	if r == nil {
 		return
@@ -196,20 +205,29 @@ func applyPostFanInEnrichment(r *report.Report) {
 	if r.DANE != nil {
 		rfc7672.EnrichWithDNSSEC(r.DANE, r.DNSSEC)
 	}
-	if r.TLSRPT != nil {
-		r.TLSRPT.RecommendedDNSTXT = rfc8460.RecommendedDNSTXT(r.Domain)
-	}
-	if r.MTASTS != nil {
-		var hosts []string
-		for _, m := range r.MXs {
-			if m.Host != "." && m.Host != "" {
-				hosts = append(hosts, m.Host)
-			}
+	// MTA-STS / TLS-RPT only make sense for domains that accept mail.
+	if r.IsMailEnabled {
+		if r.TLSRPT != nil {
+			r.TLSRPT.RecommendedDNSTXT = rfc8460.RecommendedDNSTXT(r.Domain)
 		}
-		r.MTASTS.RecommendedPolicy = rfc8461.BuildRecommendedPolicy(hosts)
-		r.MTASTS.RecommendedDNSTXT = rfc8461.RecommendedDNSTXT(r.MTASTS.PolicyID, r.MTASTS.DNSIDValid)
-		rfc8460.EnrichCrossChecks(r.MTASTS, r.TLSRPT)
-		rfc7672.EnrichMTASTSCrossCheck(r.MTASTS, r.DANE)
+		if r.MTASTS != nil {
+			var hosts []string
+			for _, m := range r.MXs {
+				if m.Host != "." && m.Host != "" {
+					hosts = append(hosts, m.Host)
+				}
+			}
+			r.MTASTS.RecommendedPolicy = rfc8461.BuildRecommendedPolicy(hosts)
+			r.MTASTS.RecommendedDNSTXT = rfc8461.RecommendedDNSTXT(r.MTASTS.PolicyID, r.MTASTS.DNSIDValid)
+			rfc8460.EnrichCrossChecks(r.MTASTS, r.TLSRPT)
+		}
+	} else if r.MTASTS != nil {
+		// Defensive: never leave mail-transport deploy recipes on a no-mail report.
+		r.MTASTS.RecommendedPolicy = ""
+		r.MTASTS.RecommendedDNSTXT = ""
+	}
+	if !r.IsMailEnabled && r.TLSRPT != nil {
+		r.TLSRPT.RecommendedDNSTXT = ""
 	}
 }
 

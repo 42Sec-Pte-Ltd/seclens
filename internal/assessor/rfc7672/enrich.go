@@ -44,16 +44,6 @@ func EnrichWithDNSSEC(dane *report.DANEResult, dnssec *report.DNSSECResult) {
 	}
 }
 
-// EnrichMTASTSCrossCheck adds RFC 8461 §2 DANE precedence hint when both DANE and MTA-STS are fully configured.
-func EnrichMTASTSCrossCheck(mtasts *report.MTASTSResult, dane *report.DANEResult) {
-	if mtasts == nil || dane == nil {
-		return
-	}
-	if mtasts.Status == "pass" && dane.DNSSECValidated && dane.MXCovered && dane.SyntaxOK {
-		mtasts.Issues = append(mtasts.Issues, "DANE validation takes precedence over MTA-STS when both apply (RFC 8461 §2)")
-	}
-}
-
 func dnssecFullyValidated(dnssec *report.DNSSECResult) bool {
 	return dnssec.FullyValidated()
 }
