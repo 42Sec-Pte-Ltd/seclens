@@ -29,21 +29,11 @@ func resolvePolicyHostIPs(ctx context.Context, deps Deps, policyDomain string) (
 		return nil, fmt.Errorf("mta-sts policy host: empty name")
 	}
 
-	ips, _ := deps.DNS.ResolveHostIPs(ctx, policyDomain)
-	if allowed := deps.IPGuard.PublicIPs(ips); len(allowed) > 0 {
-		return allowed, nil
-	}
-
-	resolver := net.Resolver{}
-	addrs, err := resolver.LookupIPAddr(ctx, policyDomain)
+	ips, err := deps.DNS.ResolveHostIPs(ctx, policyDomain)
 	if err != nil {
 		return nil, fmt.Errorf("mta-sts policy host %s: resolve: %w", policyDomain, err)
 	}
-	fallback := make([]net.IP, 0, len(addrs))
-	for _, a := range addrs {
-		fallback = append(fallback, a.IP)
-	}
-	return connectGuard(deps, fallback, policyDomain)
+	return connectGuard(deps, ips, policyDomain)
 }
 
 func connectGuard(deps Deps, ips []net.IP, policyDomain string) ([]net.IP, error) {
@@ -64,6 +54,14 @@ func policyTransport(deps Deps, policyDomain string) *http.Transport {
 			host, port, err := net.SplitHostPort(address)
 			if err != nil {
 				return nil, err
+			}
+			if port != "443" {
+				return nil, fmt.Errorf("mta-sts dial: refused non-443 port %s", port)
+			}
+			switch network {
+			case "tcp", "tcp4", "tcp6":
+			default:
+				return nil, fmt.Errorf("mta-sts dial: refused network %q", network)
 			}
 			host = strings.TrimSuffix(strings.ToLower(host), ".")
 

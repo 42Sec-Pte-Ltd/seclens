@@ -22,6 +22,8 @@ func TestParseTLSA(t *testing.T) {
 		{name: "too few fields", rdata: "3 1 1"},
 		{name: "valid EE SPKI SHA256", rdata: "3 1 1 ABCD", wantOK: true, usage: 3, selector: 1, matching: 1, wantAssoc: "ABCD"},
 		{name: "valid with spaces in hex", rdata: "0 0 1 aa bb cc dd", wantOK: true, usage: 0, selector: 0, matching: 1, wantAssoc: "AABBCCDD"},
+		{name: "cloudflare doh parenthesized assoc", rdata: "3 1 1 ( 10BA5E544C24746E0F7182959CDA4463F136EE842ADBC2F7293296EA5AE371E0 )", wantOK: true, usage: 3, selector: 1, matching: 1, wantAssoc: "10BA5E544C24746E0F7182959CDA4463F136EE842ADBC2F7293296EA5AE371E0"},
+		{name: "parenthesized assoc no inner spaces", rdata: "3 1 1 (AABBCCDD)", wantOK: true, usage: 3, selector: 1, matching: 1, wantAssoc: "AABBCCDD"},
 		{name: "rfc3597 unknown rr", rdata: `\# 4 03 01 01 ab`, wantOK: true, usage: 3, selector: 1, matching: 1, wantAssoc: "AB"},
 		{name: "usage out of range", rdata: "4 0 0 abcd"},
 		{name: "selector out of range", rdata: "3 2 1 abcd"},

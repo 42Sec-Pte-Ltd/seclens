@@ -1,6 +1,7 @@
 package assessor
 
 import (
+	"fmt"
 	"testing"
 
 	"seclens/internal/report"
@@ -344,6 +345,74 @@ func TestScoreDMARC(t *testing.T) {
 			},
 			earned: 15,
 		},
+		{
+			name: "reject omitted pct is RFC default 100",
+			dmarc: &report.DMARCResult{
+				Policy:   "reject",
+				SyntaxOK: true,
+				Raw:      "v=DMARC1; p=reject",
+			},
+			earned: 25,
+		},
+		{
+			name: "reject Pct=0 without pct= in raw is omitted default 100",
+			dmarc: &report.DMARCResult{
+				Policy:   "reject",
+				SyntaxOK: true,
+				Pct:      0,
+			},
+			earned: 25,
+		},
+		{
+			name: "reject explicit pct=0 earns zero",
+			dmarc: &report.DMARCResult{
+				Policy:   "reject",
+				SyntaxOK: true,
+				Pct:      0,
+				Raw:      "v=DMARC1; p=reject; pct=0",
+			},
+			earned: 0,
+		},
+		{
+			name: "reject PCT=0 is case-insensitive",
+			dmarc: &report.DMARCResult{
+				Policy:   "reject",
+				SyntaxOK: true,
+				Pct:      0,
+				Raw:      "v=DMARC1; p=reject; PCT=0",
+			},
+			earned: 0,
+		},
+		{
+			name: "reject pct=50 scales to 13",
+			dmarc: &report.DMARCResult{
+				Policy:   "reject",
+				SyntaxOK: true,
+				Pct:      50,
+				Raw:      "v=DMARC1; p=reject; pct=50",
+			},
+			earned: 13,
+		},
+		{
+			name: "quarantine pct=50 scales to 8",
+			dmarc: &report.DMARCResult{
+				Policy:   "quarantine",
+				SyntaxOK: true,
+				Pct:      50,
+				Raw:      "v=DMARC1; p=quarantine; pct=50",
+			},
+			earned: 8,
+		},
+		{
+			name: "reject pct=100 earns full 25",
+			dmarc: &report.DMARCResult{
+				Policy:   "reject",
+				SyntaxOK: true,
+				Pct:      100,
+				Raw:      "v=DMARC1; p=reject; pct=100",
+			},
+			earned: 25,
+		},
 	}
 
 	for _, tt := range tests {
@@ -380,13 +449,13 @@ func TestScoreMTASTS(t *testing.T) {
 		{
 			name: "invalid DNS id warn policy-fetched tier",
 			mtasts: &report.MTASTSResult{
-				DNSAdvertised: true,
-				PolicyFetched: true,
-				Status:        "warn",
-				DNSIDValid:    false,
-				PolicyID:      "2026-06-24T12:00:00Z",
-				Mode:          "enforce",
-				MXCoverageOK:  true,
+				DNSAdvertised:  true,
+				PolicyFetched:  true,
+				Status:         "warn",
+				DNSIDValid:     false,
+				PolicyID:       "2026-06-24T12:00:00Z",
+				Mode:           "enforce",
+				MXCoverageOK:   true,
 				PolicySyntaxOK: true,
 			},
 			earned: 10,
@@ -462,16 +531,27 @@ func TestScoreBinaryChecks(t *testing.T) {
 		SelectorsFound: []string{"old"},
 		Keys:           []report.DKIMKeyRecord{{Selector: "old", Revoked: true, SyntaxOK: true}},
 	})
-	if revokedEarned != 10 {
-		t.Errorf("DKIM revoked key: got %d, want 10 (discovery parity)", revokedEarned)
+	if revokedEarned != 0 {
+		t.Errorf("DKIM revoked key: got %d, want 0 (production key required)", revokedEarned)
 	}
 
 	testEarned, _ := scoreDKIM(&report.DKIMResult{
 		SelectorsFound: []string{"test"},
 		Keys:           []report.DKIMKeyRecord{{Selector: "test", TestKey: true, SyntaxOK: true}},
 	})
-	if testEarned != 10 {
-		t.Errorf("DKIM test-only key: got %d, want 10 (discovery parity)", testEarned)
+	if testEarned != 0 {
+		t.Errorf("DKIM test-only key: got %d, want 0 (production key required)", testEarned)
+	}
+
+	mixedEarned, _ := scoreDKIM(&report.DKIMResult{
+		SelectorsFound: []string{"old", "s1"},
+		Keys: []report.DKIMKeyRecord{
+			{Selector: "old", Revoked: true, SyntaxOK: true},
+			{Selector: "s1", SyntaxOK: true},
+		},
+	})
+	if mixedEarned != 10 {
+		t.Errorf("DKIM mixed revoked+production: got %d, want 10", mixedEarned)
 	}
 
 	wildEarned, _ := scoreDKIM(&report.DKIMResult{
@@ -512,14 +592,14 @@ func TestScoreBinaryChecks(t *testing.T) {
 	}
 	daneEarned, _ := scoreDANE(&report.DANEResult{
 		AdvertisedFor: []string{"mx.example.com"},
-		MXCovered: true, SyntaxOK: true, DNSSECValidated: true,
+		MXCovered:     true, SyntaxOK: true, DNSSECValidated: true,
 	})
 	if daneEarned != 10 {
 		t.Errorf("DANE full: got %d, want 10", daneEarned)
 	}
 	daneNoDNSSEC, _ := scoreDANE(&report.DANEResult{
 		AdvertisedFor: []string{"mx.example.com"},
-		MXCovered: true, SyntaxOK: true, DNSSECValidated: false,
+		MXCovered:     true, SyntaxOK: true, DNSSECValidated: false,
 	})
 	if daneNoDNSSEC != 5 {
 		t.Errorf("DANE full TLSA without DNSSEC: got %d, want 5", daneNoDNSSEC)
@@ -597,7 +677,7 @@ func TestComputeScoreCapsAt100(t *testing.T) {
 		TLSRPT: &report.TLSRPTResult{Present: true, Status: "pass", SyntaxOK: true},
 		DANE: &report.DANEResult{
 			AdvertisedFor: []string{"mx"},
-			MXCovered: true, SyntaxOK: true, DNSSECValidated: true,
+			MXCovered:     true, SyntaxOK: true, DNSSECValidated: true,
 		},
 		DNSSEC: &report.DNSSECResult{
 			DSPresent: true, DNSKEYPresent: true, ResolverAD: true, TLDSupported: true,
@@ -605,5 +685,37 @@ func TestComputeScoreCapsAt100(t *testing.T) {
 	}
 	if got := ComputeScore(r); got != 100 {
 		t.Errorf("ComputeScore cap: got %d, want 100", got)
+	}
+}
+
+func TestCollectMailMXHosts_CapsAt20LowestPref(t *testing.T) {
+	var mxs []report.MXRecord
+	for i := 0; i < 25; i++ {
+		mxs = append(mxs, report.MXRecord{Pref: uint16(30 - i), Host: fmt.Sprintf("mx%d.example.com", i)})
+	}
+	mxs = append(mxs, report.MXRecord{Pref: 0, Host: "."})
+	hosts, omitted := collectMailMXHosts(mxs, maxAssessedMXHosts)
+	if omitted != 5 {
+		t.Fatalf("omitted=%d want 5", omitted)
+	}
+	if len(hosts) != 20 {
+		t.Fatalf("len(hosts)=%d want 20", len(hosts))
+	}
+	if hosts[0] != "mx24.example.com" {
+		t.Errorf("lowest pref first: got %q want mx24.example.com", hosts[0])
+	}
+}
+
+func TestCollectMailMXHosts_NoCapUnderLimit(t *testing.T) {
+	mxs := []report.MXRecord{
+		{Pref: 20, Host: "b.example.com"},
+		{Pref: 10, Host: "a.example.com"},
+	}
+	hosts, omitted := collectMailMXHosts(mxs, maxAssessedMXHosts)
+	if omitted != 0 {
+		t.Fatalf("omitted=%d want 0", omitted)
+	}
+	if len(hosts) != 2 || hosts[0] != "a.example.com" || hosts[1] != "b.example.com" {
+		t.Fatalf("hosts=%v", hosts)
 	}
 }

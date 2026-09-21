@@ -3,16 +3,45 @@ package assessor
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	"seclens/internal/assessor/rfc7672"
 	"seclens/internal/assessor/rfc7505"
+	"seclens/internal/assessor/rfc7672"
 	"seclens/internal/assessor/rfc8460"
 	"seclens/internal/assessor/rfc8461"
 	"seclens/internal/report"
 )
+
+const (
+	maxAssessedMXHosts   = 20
+	mxIPGuardConcurrency = 8
+)
+
+// collectMailMXHosts returns non-null MX hosts, lowest preference first, capped at limit.
+func collectMailMXHosts(mxs []report.MXRecord, limit int) (hosts []string, omitted int) {
+	var items []report.MXRecord
+	for _, m := range mxs {
+		if m.Host == "" || m.Host == "." {
+			continue
+		}
+		items = append(items, m)
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		return items[i].Pref < items[j].Pref
+	})
+	if limit > 0 && len(items) > limit {
+		omitted = len(items) - limit
+		items = items[:limit]
+	}
+	hosts = make([]string, len(items))
+	for i, m := range items {
+		hosts[i] = m.Host
+	}
+	return hosts, omitted
+}
 
 // AssessmentOpts controls a single domain assessment.
 // Domains are always treated as untrusted: shape/allowlist gates, SSRF guards, and caps always apply.
@@ -40,6 +69,9 @@ func Assess(ctx context.Context, domain string, opts AssessmentOpts) (report.Rep
 
 	if opts.Timeout <= 0 {
 		opts.Timeout = 25 * time.Second
+	}
+	if r := strings.TrimSpace(opts.Resolver); r != "" {
+		SetDefaultResolver(r)
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, opts.Timeout)
@@ -80,23 +112,21 @@ func Assess(ctx context.Context, domain string, opts AssessmentOpts) (report.Rep
 	ns, _ := DefaultClient.LookupNS(ctx, domain)
 	r.Nameservers = ns
 
-	var mxHosts []string
-	for _, m := range mxs {
-		if m.Host != "." && m.Host != "" {
-			mxHosts = append(mxHosts, m.Host)
-		}
-	}
+	mxHosts, mxOmitted := collectMailMXHosts(mxs, maxAssessedMXHosts)
 
 	// Drop MX that resolve only to private IPs before DANE/MTA-STS (SSRF).
 	isSafe := make([]bool, len(mxHosts))
 	var mxGuardWG sync.WaitGroup
+	mxGuardSem := make(chan struct{}, mxIPGuardConcurrency)
 	for i, h := range mxHosts {
 		if !isValidDomainShape(h) {
 			continue
 		}
 		mxGuardWG.Add(1)
+		mxGuardSem <- struct{}{}
 		go func(idx int, host string) {
 			defer mxGuardWG.Done()
+			defer func() { <-mxGuardSem }()
 			ips, _ := DefaultClient.resolveHostIPs(ctx, host)
 			isSafe[idx] = hasPublicIP(ips)
 		}(i, h)
@@ -183,6 +213,9 @@ func Assess(ctx context.Context, domain string, opts AssessmentOpts) (report.Rep
 		applyPostFanInEnrichment(&r)
 	case <-ctx.Done():
 		r.Errors = append(r.Errors, fmt.Sprintf("assessment timed out or cancelled: %v", ctx.Err()))
+	}
+	if mxOmitted > 0 {
+		r.Errors = append(r.Errors, fmt.Sprintf("MX host list capped at %d (lowest preference first); %d additional MX not assessed", maxAssessedMXHosts, mxOmitted))
 	}
 
 	PopulateCheckScores(&r)

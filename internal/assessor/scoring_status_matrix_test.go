@@ -96,14 +96,40 @@ var scoringStatusMatrix = []struct {
 		protocol:   "DKIM",
 		name:       "warn with selectors discovery parity",
 		status:     "warn",
-		wantEarned: 10,
+		wantEarned: 0,
 		wantMax:    MaxPointsDKIM,
 		build: func() *report.Report {
 			return &report.Report{DKIM: &report.DKIMResult{
-				Status:         "warn",
+				Status:           "warn",
 				SelectorsFound:   []string{"test"},
 				WildcardDetected: false,
-				Keys:           []report.DKIMKeyRecord{{Selector: "test", TestKey: true, SyntaxOK: true}},
+				Keys:             []report.DKIMKeyRecord{{Selector: "test", TestKey: true, SyntaxOK: true}},
+			}}
+		},
+	},
+	{
+		protocol:   "DMARC",
+		name:       "warn reject pct=50 scaled",
+		status:     "warn",
+		wantEarned: 13,
+		wantMax:    MaxPointsDMARC,
+		build: func() *report.Report {
+			return &report.Report{DMARC: &report.DMARCResult{
+				Present: true, Policy: "reject", Status: "warn", SyntaxOK: true,
+				Pct: 50, Raw: "v=DMARC1; p=reject; pct=50",
+			}}
+		},
+	},
+	{
+		protocol:   "DMARC",
+		name:       "warn reject pct=0 earns zero",
+		status:     "warn",
+		wantEarned: 0,
+		wantMax:    MaxPointsDMARC,
+		build: func() *report.Report {
+			return &report.Report{DMARC: &report.DMARCResult{
+				Present: true, Policy: "reject", Status: "warn", SyntaxOK: true,
+				Pct: 0, Raw: "v=DMARC1; p=reject; pct=0",
 			}}
 		},
 	},

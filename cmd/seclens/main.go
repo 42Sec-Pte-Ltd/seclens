@@ -24,7 +24,7 @@ var (
 	flagFormat      = flag.String("format", "text", "Output format: text, json, jsonl")
 	flagTimeout     = flag.Duration("timeout", 30*time.Second, "Overall timeout per domain")
 	flagResolver    = flag.String("resolver", "cloudflare", "DoH resolver(s): cloudflare, google, quad9 (comma-separated for pool)")
-	flagSMTP        = flag.Bool("smtp", false, "Perform optional deep SMTP/STARTTLS checks (port 25; often blocked)")
+	flagSMTP        = flag.Bool("smtp", false, "Unused (accepted for compatibility). SecLens does not open SMTP; DANE is DNS-only.")
 	flagFile        = flag.String("file", "", "Read domains from file (one per line)")
 	flagStdin       = flag.Bool("stdin", false, "Read domains from stdin (one per line)")
 	flagHelp        = flag.Bool("help", false, "Show help")

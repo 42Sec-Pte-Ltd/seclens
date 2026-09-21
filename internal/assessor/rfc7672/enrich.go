@@ -20,12 +20,12 @@ func EnrichWithDNSSEC(dane *report.DANEResult, dnssec *report.DNSSECResult) {
 	if dane.MXCovered && dane.SyntaxOK {
 		if dane.DNSSECValidated {
 			dane.Status = "pass"
-			dane.Message = "DANE fully configured (TLSA for all MX hosts + DNSSEC validated)"
+			dane.Message = "DANE TLSA published for all public MX hosts; resolver AD observed (no SMTP or certificate match)"
 		} else {
 			dane.Status = "warn"
 			dane.Issues = appendUniqueIssue(dane.Issues,
 				"TLSA records without DNSSEC validation provide no security benefit (RFC 7672 §2.1 requires DNSSEC)")
-			dane.Message = "DANE TLSA advertised but DNSSEC validation incomplete"
+			dane.Message = "DANE TLSA advertised but DNSSEC validation incomplete (resolver AD not observed; no SMTP or certificate match)"
 		}
 		return
 	}
@@ -34,11 +34,11 @@ func EnrichWithDNSSEC(dane *report.DANEResult, dnssec *report.DNSSECResult) {
 		dane.Issues = appendUniqueIssue(dane.Issues,
 			"TLSA records without DNSSEC validation provide no security benefit (RFC 7672 §2.1 requires DNSSEC)")
 		if dane.Status == "warn" && dane.MXCovered && dane.SyntaxOK {
-			dane.Message = "DANE TLSA advertised but DNSSEC validation incomplete"
+			dane.Message = "DANE TLSA advertised but DNSSEC validation incomplete (resolver AD not observed; no SMTP or certificate match)"
 		} else if dane.Status != "info" {
 			dane.Status = "warn"
 			if dane.Message == "" || strings.Contains(dane.Message, "pending DNSSEC") {
-				dane.Message = "DANE TLSA advertised but DNSSEC validation incomplete"
+				dane.Message = "DANE TLSA advertised but DNSSEC validation incomplete (resolver AD not observed; no SMTP or certificate match)"
 			}
 		}
 	}

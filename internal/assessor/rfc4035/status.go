@@ -17,17 +17,17 @@ func ApplyStatus(res *report.DNSSECResult) {
 	}
 	if res.DSPresent && res.DNSKEYPresent && resolverValidated(res) {
 		res.Status = "pass"
-		res.Message = "DNSSEC enabled (DS + DNSKEY + resolver validated)"
+		res.Message = "DNSSEC enabled (DS + DNSKEY published; resolver AD observed)"
 		return
 	}
 	if res.DSPresent {
 		res.Status = "warn"
 		if resolverValidated(res) && !res.DNSKEYPresent {
-			res.Message = "DNSSEC partially configured (DS + resolver validated; DNSKEY missing)"
+			res.Message = "DNSSEC partially configured (DS + resolver AD observed; DNSKEY missing)"
 		} else if res.DNSKEYPresent && !resolverValidated(res) {
-			res.Message = "DNSSEC partially configured (DS + DNSKEY present; resolver validation incomplete)"
+			res.Message = "DNSSEC partially configured (DS + DNSKEY present; resolver AD not observed)"
 		} else {
-			res.Message = "DNSSEC partially configured (DS present; DNSKEY or resolver validation incomplete)"
+			res.Message = "DNSSEC partially configured (DS present; DNSKEY or resolver AD not observed)"
 		}
 		return
 	}

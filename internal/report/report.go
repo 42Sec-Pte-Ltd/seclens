@@ -9,29 +9,40 @@ import (
 	"time"
 )
 
+// Public listing kinds for Report.Listing.
+const (
+	ListingCorpus    = "corpus"
+	ListingEphemeral = "ephemeral"
+)
+
 // Report is the top-level result for one domain.
 type Report struct {
-	Domain        string
-	Generated     time.Time
-	IsMailEnabled    bool
-	HasNullMX        bool // RFC 7505: MX set contains a null MX RR (0 .); not equivalent to "no mail"
-	Profile          string // "mail" | "null_mx" | "no_mx"
-	NullMXCompliant  bool   // true when no-mail profile fully hardened (score 100)
-	ApplicableMax    int    // sum of applicable check max points (always 100)
-	MXs              []MXRecord
-	Nameservers   []string
+	Domain          string
+	Generated       time.Time
+	IsMailEnabled   bool
+	HasNullMX       bool   // RFC 7505: MX set contains a null MX RR (0 .); not equivalent to "no mail"
+	Profile         string // "mail" | "null_mx" | "no_mx"
+	NullMXCompliant bool   // true when no-mail profile fully hardened (score 100)
+	ApplicableMax   int    // sum of applicable check max points (always 100)
+	MXs             []MXRecord
+	Nameservers     []string
 
-	NullMX  *NullMXResult
-	SPF     *SPFResult
-	DMARC   *DMARCResult
-	DKIM    *DKIMResult
-	MTASTS  *MTASTSResult
-	TLSRPT  *TLSRPTResult
-	DANE    *DANEResult
-	DNSSEC  *DNSSECResult
+	NullMX *NullMXResult
+	SPF    *SPFResult
+	DMARC  *DMARCResult
+	DKIM   *DKIMResult
+	MTASTS *MTASTSResult
+	TLSRPT *TLSRPTResult
+	DANE   *DANEResult
+	DNSSEC *DNSSECResult
 
 	Errors []string
 	Score  int // 0-100 rough
+
+	// Listing selects public surface lifetime.
+	// ListingCorpus (or empty on legacy disk): durable corpus; no deep-link TTL.
+	// ListingEphemeral: API public scan; detail and summary honor publicResultTTL.
+	Listing string `json:"listing,omitempty"`
 
 	// DNSTrace records every DoH query of this assessment with the raw JSON answers
 	// from all providers (multi-provider fan-out) and which provider's response was
@@ -84,18 +95,7 @@ func (r Report) PrintText(w io.Writer) {
 	fmt.Fprintln(tw, "-----\t------\t-------")
 
 	printRow := func(name, status, msg string) {
-		symbol := status
-		switch strings.ToLower(status) {
-		case "pass":
-			symbol = "[PASS]"
-		case "warn":
-			symbol = "[WARN]"
-		case "fail", "error":
-			symbol = "[FAIL]"
-		default:
-			symbol = "[INFO]"
-		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\n", name, symbol, msg)
+		fmt.Fprintf(tw, "%s\t%s\t%s\n", name, statusLabel(status), msg)
 	}
 
 	if r.NullMX != nil {
@@ -159,6 +159,21 @@ func (r Report) PrintText(w io.Writer) {
 	fmt.Fprintln(w)
 }
 
+// statusLabel maps a check status to the text-report marker.
+// Exhaustive: every branch returns a label (no unused seed assignment).
+func statusLabel(status string) string {
+	switch strings.ToLower(status) {
+	case "pass":
+		return "[PASS]"
+	case "warn":
+		return "[WARN]"
+	case "fail", "error":
+		return "[FAIL]"
+	default:
+		return "[INFO]"
+	}
+}
+
 // ToJSON returns compact JSON for the report (single domain).
 func (r Report) ToJSON() []byte {
 	b, _ := json.MarshalIndent(r, "", "  ")
@@ -166,7 +181,7 @@ func (r Report) ToJSON() []byte {
 }
 
 // The following result types are defined here (moved from assessor package)
-// to avoid import cycles (report is used by assessor and server).
+// to avoid import cycles (report is used by assessor and CLI).
 // They are re-exported for convenience via the report package.
 
 // SPFResult holds the analyzed SPF posture for a domain.
@@ -177,7 +192,7 @@ type SPFResult struct {
 	AllQualifier         string // "", "+", "-", "~", "?"
 	Mechanisms           []string
 	Includes             []string
-	LookupCount          int  // approximate number of DNS lookups (include/a/mx/ptr/exists)
+	LookupCount          int // approximate number of DNS lookups (include/a/mx/ptr/exists)
 	HasRedirect          bool
 	RedirectTarget       string
 	RedirectedSPFRaw     string // raw SPF record of the redirect target (if followed)
@@ -200,12 +215,12 @@ type SPFResult struct {
 
 // SPFChainEntry represents one level in the SPF evaluation chain (for hierarchical display).
 type SPFChainEntry struct {
-	Level      int    `json:"level"`
-	Domain     string `json:"domain"`
-	Raw        string `json:"raw"`
-	Type       string `json:"type"`                 // "published", "redirect-target", "include"
+	Level       int    `json:"level"`
+	Domain      string `json:"domain"`
+	Raw         string `json:"raw"`
+	Type        string `json:"type"`                  // "published", "redirect-target", "include"
 	IsEffective bool   `json:"isEffective,omitempty"` // true for the policy whose *all actually terminates the evaluation
-	Note       string `json:"note,omitempty"`
+	Note        string `json:"note,omitempty"`
 }
 
 // DMARCResult captures DMARC posture (RFC 7489 assessor in internal/assessor/rfc7489).
@@ -245,7 +260,7 @@ type DKIMKeyRecord struct {
 // DKIMResult ...
 type DKIMResult struct {
 	SelectorsFound   []string
-	SelectorsProbed  int // total distinct selector names probed during discovery
+	SelectorsProbed  int               // total distinct selector names probed during discovery
 	RawRecords       map[string]string // selector -> raw DKIM TXT record value (populated by CheckDKIM)
 	Keys             []DKIMKeyRecord
 	Issues           []string
@@ -262,23 +277,23 @@ type DKIMResult struct {
 
 // MTASTSResult ...
 type MTASTSResult struct {
-	DNSAdvertised  bool
-	PolicyFetched  bool
-	RawDNSTXT      string
-	RawPolicy      string
-	Version        string
-	Mode           string // enforce, testing, none
-	MXPatterns     []string
-	MaxAge         int
+	DNSAdvertised     bool
+	PolicyFetched     bool
+	RawDNSTXT         string
+	RawPolicy         string
+	Version           string
+	Mode              string // enforce, testing, none
+	MXPatterns        []string
+	MaxAge            int
 	MXCoverageOK      bool
 	PolicyID          string // id= from _mta-sts DNS TXT (RFC 8461 §3.1)
 	DNSIDValid        bool   // id= matches RFC 8461 ABNF (1*32 ALPHA/DIGIT)
 	PolicySyntaxOK    bool   // version/mode/max_age/mx per RFC 8461 §3.2
 	RecommendedPolicy string // RFC 8461 Appendix A style policy body for deployment
 	RecommendedDNSTXT string // paired _mta-sts TXT recommendation (id= only in DNS)
-	Issues         []string
-	Status         string
-	Message        string
+	Issues            []string
+	Status            string
+	Message           string
 
 	EarnedPoints int // per-check score contribution (0–MaxPoints)
 	MaxPoints    int // maximum points for this check (MTA-STS=15)
@@ -297,22 +312,23 @@ type NullMXResult struct {
 
 // DNSSECResult ...
 type DNSSECResult struct {
-	DSPresent    bool
+	DSPresent     bool
 	DNSKEYPresent bool
-	DSRecords    []string // raw DS RDATA strings
-	AD           bool     // resolver AD bit (same as ResolverAD; legacy JSON field)
-	ResolverAD   bool     // AD bit from DoH resolver on probe lookup
-	SyntaxOK     bool     // all published DS records parse cleanly
-	TLDSupported bool     // false when parent TLD does not publish DS/DNSKEY
-	Issues       []string
-	Status       string
-	Message      string
+	DSRecords     []string // raw DS RDATA strings
+	AD            bool     // resolver AD bit (same as ResolverAD; legacy JSON field)
+	ResolverAD    bool     // AD bit from DoH resolver on probe lookup
+	SyntaxOK      bool     // all published DS records parse cleanly
+	TLDSupported  bool     // false when parent TLD does not publish DS/DNSKEY
+	Issues        []string
+	Status        string
+	Message       string
 
 	EarnedPoints int // per-check score contribution (0–MaxPoints)
 	MaxPoints    int // maximum points for this check (DNSSEC=10 mail / 15 null_mx)
 }
 
-// FullyValidated reports whether DNSSEC is fully configured: DS + DNSKEY + resolver AD.
+// FullyValidated reports DS + DNSKEY published and a trusted DoH resolver reported the AD bit.
+// SecLens does not perform its own cryptographic chain validation. JSON field name is unchanged.
 func (d *DNSSECResult) FullyValidated() bool {
 	if d == nil || !d.DSPresent || !d.DNSKEYPresent {
 		return false
@@ -332,11 +348,11 @@ type TLSARecord struct {
 // DANEResult ...
 type DANEResult struct {
 	AdvertisedFor   []string
-	Records         map[string][]string            // host -> raw TLSA RDATA strings (for detail)
-	ParsedRecords   map[string][]TLSARecord        // host -> parsed TLSA records
-	MXCovered       bool                           // all MX hosts have valid TLSA
-	SyntaxOK        bool                           // every published TLSA record parses cleanly
-	DNSSECValidated bool                           // set post-enrich from DNSSEC check
+	Records         map[string][]string     // host -> raw TLSA RDATA strings (for detail)
+	ParsedRecords   map[string][]TLSARecord // host -> parsed TLSA records
+	MXCovered       bool                    // all MX hosts have valid TLSA
+	SyntaxOK        bool                    // every published TLSA record parses cleanly
+	DNSSECValidated bool                    // post-enrich: DS+DNSKEY+resolver AD observed (not a live cert match)
 	Issues          []string
 	Status          string
 	Message         string
@@ -347,7 +363,7 @@ type DANEResult struct {
 
 // TLSRPTResult ...
 type TLSRPTResult struct {
-	Present           bool   // TLS-RPT TXT advertised at _smtp._tls (may be syntactically invalid)
+	Present           bool // TLS-RPT TXT advertised at _smtp._tls (may be syntactically invalid)
 	Raw               string
 	Version           string // v= (e.g. TLSRPTv1)
 	RUA               []string

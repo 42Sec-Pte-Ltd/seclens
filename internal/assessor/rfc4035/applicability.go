@@ -30,6 +30,23 @@ var compoundTLDs = map[string]bool{
 const (
 	qtypeDS     uint16 = 43
 	qtypeDNSKEY uint16 = 48
+
+	// DNS RCODEs (RFC 1035 / DoH JSON Status).
+	rcodeNOERROR  = 0
+	rcodeSERVFAIL = 2
+	rcodeNXDOMAIN = 3
+)
+
+// zoneSupport is the result of probing whether a parent/TLD zone participates in DNSSEC.
+type zoneSupport int
+
+const (
+	// zoneSupportUnknown: transport/RCODE failure — must not be cached.
+	zoneSupportUnknown zoneSupport = iota
+	// zoneSupportYes: definitive evidence the zone is signed / DS-capable.
+	zoneSupportYes
+	// zoneSupportNo: definitive empty answers (no DS at parent, no DNSKEY at apex).
+	zoneSupportNo
 )
 
 // parentZoneCandidates returns parent-zone names to probe for DNSSEC infrastructure.
@@ -64,18 +81,69 @@ func parentZoneCandidates(domain string) []string {
 }
 
 // zoneDNSSECCache memoizes per-zone (e.g. "com") DNSSEC support for the lifetime of the process,
-// keyed by the DNS client instance. TLD DNSSEC support changes on the order of years, not within
-// a single run, so caching is safe. Without this, bulk/high-concurrency runs across many domains
-// sharing the same handful of TLDs (com, net, org, ...) issue redundant DS/DNSKEY lookups against
-// those TLD zones for every single domain — at 1M-domain scale this hammers the DoH resolver hard
-// enough to trigger rate-limiting/errors, which makes zoneSupportsDNSSEC report false for
-// everything and silently zeroes out DNSSEC adoption across the whole corpus.
+// keyed by the DNS client instance. Only definitive Yes/No results are stored — never transport
+// errors or SERVFAIL. Caching errors previously made the first rate-limit against "com" poison
+// every subsequent domain under that TLD for the whole process (silent corpus-wide false
+// "TLD does not support DNSSEC").
+//
+// TLD DNSSEC support changes on the order of years, so caching definitive answers is safe and
+// still avoids hammering DoH on bulk runs once a zone has been classified.
 var (
 	zoneDNSSECCacheMu sync.Mutex
-	zoneDNSSECCache   = map[DNS]map[string]bool{}
+	zoneDNSSECCache   = map[DNS]map[string]zoneSupport{}
 )
 
-func zoneSupportsDNSSEC(ctx context.Context, zone string, dns DNS) bool {
+// probeAnswer classifies a single LookupRRWithMeta outcome.
+// hasRR: answer contained records.
+// empty: successful query with no records (NOERROR/NODATA or NXDOMAIN).
+// inconclusive: transport error or non-terminal RCODE (SERVFAIL, …).
+func probeAnswer(qr QueryResult, err error) (hasRR, empty, inconclusive bool) {
+	if err != nil {
+		return false, false, true
+	}
+	if len(qr.RRs) > 0 {
+		return true, false, false
+	}
+	// Empty answer is only definitive for NOERROR (NODATA) or NXDOMAIN.
+	// SERVFAIL / FORMERR / REFUSED / … are treated as inconclusive.
+	switch qr.Status {
+	case rcodeNOERROR, rcodeNXDOMAIN:
+		return false, true, false
+	default:
+		// Includes SERVFAIL (2) and other non-success RCODEs.
+		return false, false, true
+	}
+}
+
+// rootDSProbe asks for DS RRs at the zone name itself.
+//
+// For a classic TLD label (e.g. "com"), a recursive resolver answers this from the DNS root:
+// the root's DS for that TLD is the explicit signal that the TLD is signed and can publish
+// DS records for child zones. This is not "DS inside the TLD zone for itself" in the
+// authoritative sense — it is the root-side delegation signer record for the TLD.
+func rootDSProbe(ctx context.Context, zone string, dns DNS) (hasDS bool, inconclusive bool) {
+	qr, err := dns.LookupRRWithMeta(ctx, zone, qtypeDS)
+	hasRR, _, inc := probeAnswer(qr, err)
+	if inc {
+		return false, true
+	}
+	if hasRR {
+		return true, false
+	}
+	return false, false
+}
+
+// apexDNSKEYProbe checks whether the zone apex publishes DNSKEY (zone is signed).
+func apexDNSKEYProbe(ctx context.Context, zone string, dns DNS) (hasKEY bool, inconclusive bool) {
+	qr, err := dns.LookupRRWithMeta(ctx, zone, qtypeDNSKEY)
+	hasRR, _, inc := probeAnswer(qr, err)
+	if inc {
+		return false, true
+	}
+	return hasRR, false
+}
+
+func zoneDNSSECSupport(ctx context.Context, zone string, dns DNS) zoneSupport {
 	zoneDNSSECCacheMu.Lock()
 	if byZone, ok := zoneDNSSECCache[dns]; ok {
 		if v, ok := byZone[zone]; ok {
@@ -85,30 +153,73 @@ func zoneSupportsDNSSEC(ctx context.Context, zone string, dns DNS) bool {
 	}
 	zoneDNSSECCacheMu.Unlock()
 
-	supported := false
-	ds, err := dns.LookupRRWithMeta(ctx, zone, qtypeDS)
-	if err == nil && len(ds.RRs) > 0 {
-		supported = true
-	} else {
-		dnskey, err2 := dns.LookupRRWithMeta(ctx, zone, qtypeDNSKEY)
-		supported = err2 == nil && len(dnskey.RRs) > 0
+	result := probeZoneDNSSEC(ctx, zone, dns)
+
+	// Never cache unknowns (errors / SERVFAIL): the next domain under this TLD must re-probe.
+	if result == zoneSupportUnknown {
+		return result
 	}
 
 	zoneDNSSECCacheMu.Lock()
 	if zoneDNSSECCache[dns] == nil {
-		zoneDNSSECCache[dns] = map[string]bool{}
+		zoneDNSSECCache[dns] = map[string]zoneSupport{}
 	}
-	zoneDNSSECCache[dns][zone] = supported
+	zoneDNSSECCache[dns][zone] = result
 	zoneDNSSECCacheMu.Unlock()
-	return supported
+	return result
+}
+
+func probeZoneDNSSEC(ctx context.Context, zone string, dns DNS) zoneSupport {
+	// 1) Explicit root-side DS for the zone name (primary signal for TLD capability).
+	hasDS, dsInc := rootDSProbe(ctx, zone, dns)
+	if hasDS {
+		return zoneSupportYes
+	}
+
+	// 2) Apex DNSKEY (zone is signed) as secondary signal.
+	hasKEY, keyInc := apexDNSKEYProbe(ctx, zone, dns)
+	if hasKEY {
+		return zoneSupportYes
+	}
+
+	// Both probes inconclusive → unknown (do not claim "unsupported").
+	if dsInc && keyInc {
+		return zoneSupportUnknown
+	}
+	// One definitive empty + one error: still unknown (missing half of the evidence).
+	if dsInc || keyInc {
+		return zoneSupportUnknown
+	}
+	// Both definitive empty → TLD/parent does not present DNSSEC infrastructure.
+	return zoneSupportNo
 }
 
 // ParentSupportsDNSSEC reports whether the assessed domain's parent chain can publish DS records.
+//
+// Definitive "yes" from any parent candidate wins immediately.
+// Definitive "no" from all candidates (and no unknown) → false.
+// Any inconclusive probe fails open (returns true) so rate-limits and SERVFAIL cannot
+// masquerade as "DNSSEC not applicable (TLD does not support DNSSEC)".
 func ParentSupportsDNSSEC(ctx context.Context, domain string, dns DNS) bool {
-	for _, zone := range parentZoneCandidates(domain) {
-		if zoneSupportsDNSSEC(ctx, zone, dns) {
+	candidates := parentZoneCandidates(domain)
+	if len(candidates) == 0 {
+		return false
+	}
+
+	sawNo := false
+	sawUnknown := false
+	for _, zone := range candidates {
+		switch zoneDNSSECSupport(ctx, zone, dns) {
+		case zoneSupportYes:
 			return true
+		case zoneSupportNo:
+			sawNo = true
+		case zoneSupportUnknown:
+			sawUnknown = true
 		}
 	}
-	return false
+	if sawUnknown {
+		return true
+	}
+	return !sawNo
 }

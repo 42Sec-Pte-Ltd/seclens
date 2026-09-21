@@ -8,11 +8,11 @@ import (
 
 // TLSAParsed is the wire-format fields of a TLSA record in presentation form (RFC 6698 §2.1).
 type TLSAParsed struct {
-	Usage            uint8
-	Selector         uint8
-	MatchingType     uint8
-	AssociationData  string
-	SyntaxOK         bool
+	Usage           uint8
+	Selector        uint8
+	MatchingType    uint8
+	AssociationData string
+	SyntaxOK        bool
 }
 
 // ParseTLSA parses TLSA RDATA in presentation form:
@@ -44,6 +44,13 @@ func ParseTLSA(rdata string) TLSAParsed {
 	}
 
 	assoc := strings.ToUpper(strings.Join(fields[3:], ""))
+	// RFC 1035 master-file parentheses (Cloudflare DoH wraps the hex).
+	assoc = strings.Map(func(r rune) rune {
+		if r == '(' || r == ')' {
+			return -1
+		}
+		return r
+	}, assoc)
 	if assoc == "" || len(assoc)%2 != 0 {
 		return TLSAParsed{}
 	}

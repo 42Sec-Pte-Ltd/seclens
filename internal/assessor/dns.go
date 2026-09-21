@@ -2,6 +2,7 @@ package assessor
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,10 +14,17 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"seclens/internal/assessor/rfc7505"
 	"seclens/internal/report"
+)
+
+const (
+	dohHedgeDelay      = 25 * time.Millisecond
+	dohMaxConnsPerHost = 64
+	dohTLSSessionCache = 256
 )
 
 // DoH provider base URLs (JSON API)
@@ -83,14 +91,27 @@ func NewDoHClient(provider string) *DoHClient {
 		baseURLs: urls,
 		HTTPClient: &http.Client{
 			Timeout: 6 * time.Second,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 			Transport: &http.Transport{
-				Proxy:                 http.ProxyFromEnvironment,
+				// No Proxy: do not honor HTTP_PROXY (SSRF).
+				Proxy: nil,
+				DialContext: (&net.Dialer{
+					Timeout:   5 * time.Second,
+					KeepAlive: 30 * time.Second,
+				}).DialContext,
+				ForceAttemptHTTP2:     true,
 				MaxIdleConns:          1024,
-				MaxIdleConnsPerHost:   256,
+				MaxIdleConnsPerHost:   dohMaxConnsPerHost,
+				MaxConnsPerHost:       dohMaxConnsPerHost,
 				IdleConnTimeout:       90 * time.Second,
 				TLSHandshakeTimeout:   10 * time.Second,
 				ExpectContinueTimeout: 1 * time.Second,
-				ForceAttemptHTTP2:     true,
+				TLSClientConfig: &tls.Config{
+					NextProtos:         []string{"h2", "http/1.1"},
+					ClientSessionCache: tls.NewLRUClientSessionCache(dohTLSSessionCache),
+				},
 			},
 		},
 		retryCount: 2, // two retries (total 3 attempts) on transient DoH flakes (http errors, timeouts, decode) — fixes flaky include lookups like spf.smtp2go.com seen in reports
@@ -196,11 +217,11 @@ func betterDoHResponse(a, b *DoHResponse) bool {
 	return a.AD && !b.AD
 }
 
-// doQuery executes a DoH request. With a provider pool it fans out to all
-// providers in parallel and returns the best response (per betterDoHResponse),
-// so a flake or stale cache at one provider cannot hide records the other serves.
-// When the context carries a dnsTraceCollector (see withDNSTrace), all provider
-// outcomes including the raw JSON bodies are recorded for traceability.
+// doQuery executes a DoH request. A provider pool starts the first URL immediately
+// and hedges the rest after dohHedgeDelay if no decoded response has arrived, so a
+// flake still fails over without doubling TLS/DoH load on the fast path.
+// When the context carries a dnsTraceCollector (see withDNSTrace), started
+// provider outcomes including the raw JSON bodies are recorded for traceability.
 func (c *DoHClient) doQuery(ctx context.Context, name string, qtype uint16) (*DoHResponse, error) {
 	if name == "" {
 		return nil, errors.New("empty name")
@@ -226,13 +247,49 @@ func (c *DoHClient) doQuery(ctx context.Context, name string, qtype uint16) (*Do
 	if len(c.baseURLs) == 1 {
 		outs[0] = run(0, c.baseURLs[0])
 	} else {
-		ch := make(chan outcome, len(c.baseURLs))
-		for i, base := range c.baseURLs {
-			go func(i int, base string) { ch <- run(i, base) }(i, base)
+		ctx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		run = func(i int, base string) outcome {
+			start := time.Now()
+			dr, raw, err := c.doQueryProvider(ctx, base, name, qtype)
+			return outcome{idx: i, dr: dr, raw: raw, err: err, rtt: time.Since(start)}
 		}
-		for range c.baseURLs {
-			o := <-ch
-			outs[o.idx] = o
+		ch := make(chan outcome, len(c.baseURLs))
+		startOne := func(i int) {
+			go func() { ch <- run(i, c.baseURLs[i]) }()
+		}
+		startOne(0)
+		started := 1
+		collected := 0
+		hasAnswers := false
+		hedge := time.NewTimer(dohHedgeDelay)
+		defer hedge.Stop()
+		for collected < started || (!hasAnswers && started < len(c.baseURLs)) {
+			if collected == started && !hasAnswers && started < len(c.baseURLs) {
+				startOne(started)
+				started++
+				if started < len(c.baseURLs) {
+					hedge.Reset(dohHedgeDelay)
+				}
+				continue
+			}
+			select {
+			case o := <-ch:
+				collected++
+				outs[o.idx] = o
+				if o.dr != nil && dohResponseRank(o.dr) >= 4 {
+					hasAnswers = true
+					cancel()
+				}
+			case <-hedge.C:
+				if !hasAnswers && started < len(c.baseURLs) {
+					startOne(started)
+					started++
+					if started < len(c.baseURLs) {
+						hedge.Reset(dohHedgeDelay)
+					}
+				}
+			}
 		}
 	}
 
@@ -249,6 +306,9 @@ func (c *DoHClient) doQuery(ctx context.Context, name string, qtype uint16) (*Do
 	if trace := dnsTraceFrom(ctx); trace != nil {
 		e := report.DNSQueryTrace{Name: strings.TrimSuffix(name, "."), Type: qtype}
 		for i, o := range outs {
+			if o.dr == nil && o.err == nil {
+				continue
+			}
 			p := report.DNSProviderTrace{
 				Provider: providerNameForURL(c.baseURLs[i]),
 				RTTMs:    o.rtt.Milliseconds(),
@@ -382,19 +442,32 @@ func (c *DoHClient) lookupTXTFollow(ctx context.Context, name string, depth int)
 
 // LookupMX returns MX records for the name (type 15).
 // Data format from DoH is usually "10 mail.example.com." (preference + host).
+// Transport errors and non-NOERROR/NXDOMAIN RCODEs (e.g. SERVFAIL) return an error
+// so callers do not treat resolver failure as empty MX.
 func (c *DoHClient) LookupMX(ctx context.Context, name string) ([]report.MXRecord, error) {
 	dr, err := c.doQuery(ctx, name, 15)
 	if err != nil {
 		return nil, err
 	}
-	if dr.Status == 3 {
-		return nil, nil
-	}
-	var out []report.MXRecord
+	var answers []string
 	for _, a := range dr.Answer {
 		if a.Type == 15 {
-			// Parse "pref host." or "pref host"
-			fields := strings.Fields(a.Data)
+			answers = append(answers, a.Data)
+		}
+	}
+	return mxFromDoH(dr.Status, answers...)
+}
+
+// mxFromDoH maps a DoH MX RCODE + rdata into records.
+// NXDOMAIN and NOERROR/NODATA are true empty MX; any other RCODE is an error.
+func mxFromDoH(status int, answers ...string) ([]report.MXRecord, error) {
+	switch status {
+	case 3: // NXDOMAIN
+		return nil, nil
+	case 0: // NOERROR (including NODATA)
+		var out []report.MXRecord
+		for _, data := range answers {
+			fields := strings.Fields(data)
 			if len(fields) >= 2 {
 				var pref uint16
 				_, _ = fmt.Sscanf(fields[0], "%d", &pref)
@@ -402,8 +475,10 @@ func (c *DoHClient) LookupMX(ctx context.Context, name string) ([]report.MXRecor
 				out = append(out, report.MXRecord{Pref: pref, Host: host})
 			}
 		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("mx doh rcode %d", status)
 	}
-	return out, nil
 }
 
 // LookupRRWithMeta performs a generic query and returns RRs plus DoH AD/Status metadata.
@@ -628,7 +703,8 @@ func init() {
 		"172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24", "192.88.99.0/24", "192.168.0.0/16",
 		"198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24",
 		"224.0.0.0/4", "240.0.0.0/4",
-		"::1/128", "fe80::/10", "fc00::/7", "ff00::/8",
+		"::/128", "::1/128", "64:ff9b::/96", "64:ff9b:1::/48", "2002::/16",
+		"fe80::/10", "fec0::/10", "fc00::/7", "ff00::/8",
 	} {
 		if _, n, err := net.ParseCIDR(c); err == nil {
 			privateCIDRs = append(privateCIDRs, n)
@@ -638,7 +714,7 @@ func init() {
 
 // isPrivateOrLocalIP returns true for any IP in the private/local/special ranges above.
 func isPrivateOrLocalIP(ip net.IP) bool {
-	if ip == nil {
+	if ip == nil || ip.IsUnspecified() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() {
 		return true
 	}
 	for _, n := range privateCIDRs {
@@ -700,9 +776,26 @@ func init() {
 }
 
 // Default multi-provider pool (fan-out; best answer wins — Top-1M measurement parity).
-var DefaultClient = NewDoHClient("cloudflare,google")
+var (
+	DefaultClient = NewDoHClient("cloudflare,google")
+
+	defaultResolverMu  sync.Mutex
+	defaultResolverKey = "cloudflare,google"
+)
 
 // SetDefaultResolver sets the global DoH pool (CLI --resolver; comma-separated).
+// Same pool string is a no-op so bulk Assess jobs keep one Transport and reuse
+// HTTP/2 + TLS sessions instead of opening a handshake per domain.
 func SetDefaultResolver(provider string) {
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		return
+	}
+	defaultResolverMu.Lock()
+	defer defaultResolverMu.Unlock()
+	if provider == defaultResolverKey && DefaultClient != nil {
+		return
+	}
 	DefaultClient = NewDoHClient(provider)
+	defaultResolverKey = provider
 }

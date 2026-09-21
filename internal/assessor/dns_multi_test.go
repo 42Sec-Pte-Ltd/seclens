@@ -62,6 +62,49 @@ func TestDoQueryPoolPrefersAnswersOverServfailAndError(t *testing.T) {
 	}
 }
 
+func TestLookupMXRcodeIntegrity(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		wantN   int
+		wantErr bool
+	}{
+		{name: "nxdomain", body: `{"Status":3}`, wantN: 0},
+		{name: "nodata", body: `{"Status":0,"Answer":[]}`, wantN: 0},
+		{name: "ok", body: `{"Status":0,"Answer":[{"name":"example.com","type":15,"TTL":300,"data":"10 mail.example.com."}]}`, wantN: 1},
+		{name: "servfail", body: `{"Status":2}`, wantErr: true},
+		{name: "refused", body: `{"Status":5}`, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newFakeDoH(t, tt.body, http.StatusOK)
+			defer srv.Close()
+			c := newTestPoolClient(srv.URL)
+			mxs, err := c.LookupMX(context.Background(), "example.com")
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected rcode error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(mxs) != tt.wantN {
+				t.Fatalf("len=%d want %d (%v)", len(mxs), tt.wantN, mxs)
+			}
+		})
+	}
+	t.Run("transport", func(t *testing.T) {
+		srv := newFakeDoH(t, "oops", http.StatusInternalServerError)
+		defer srv.Close()
+		c := newTestPoolClient(srv.URL)
+		if _, err := c.LookupMX(context.Background(), "example.com"); err == nil {
+			t.Fatal("expected transport error")
+		}
+	})
+}
+
 func TestDoQueryPoolAllFail(t *testing.T) {
 	brokenA := newFakeDoH(t, `oops`, http.StatusInternalServerError)
 	defer brokenA.Close()

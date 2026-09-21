@@ -59,7 +59,11 @@ func AnalyzeRaw(raw string, nullMXProfile bool) report.DMARCResult {
 	case "reject":
 		// best for the domain (25 pts)
 	case "quarantine":
-		res.Issues = append(res.Issues, "p=quarantine is better than none (15 pts partial) but weaker than reject for most senders")
+		if nullMXProfile {
+			res.Issues = append(res.Issues, "p=quarantine scores 0 on the no-mail profile (p=reject required)")
+		} else {
+			res.Issues = append(res.Issues, "p=quarantine is better than none but weaker than reject for most senders")
+		}
 	case "none":
 		res.Issues = append(res.Issues, "p=none (monitoring only) — provides almost no blocking of spoofed mail (0 pts)")
 		res.Status = "warn"

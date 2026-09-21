@@ -2,6 +2,7 @@ package assessor
 
 import (
 	"math"
+	"strconv"
 	"strings"
 
 	"seclens/internal/assessor/rfc7505"
@@ -295,29 +296,97 @@ func scoreSPF(spf *report.SPFResult) (earned, max int) {
 	return earned, max
 }
 
-// DMARC points from p= only (sp= informational); invalid syntax ⇒ 0.
+// DMARC points from p= (sp= informational); invalid syntax ⇒ 0.
+// Full 25/15 requires the policy to apply to 100% of mail (pct omitted or 100).
+// Lower pct scales: int(math.Round(base * pct / 100)). Null-MX uses scoreDMARCNullMX.
 func scoreDMARC(dmarc *report.DMARCResult) (earned, max int) {
 	max = MaxPointsDMARC
 	if dmarc == nil || !dmarc.SyntaxOK {
 		return 0, max
 	}
+	var base int
 	switch dmarc.Policy {
 	case "reject":
-		return 25, max
+		base = 25
 	case "quarantine":
-		return 15, max
+		base = 15
 	default:
 		return 0, max
 	}
+	pct := effectiveDMARCPct(dmarc)
+	if pct >= 100 {
+		return base, max
+	}
+	if pct <= 0 {
+		return 0, max
+	}
+	return int(math.Round(float64(base) * float64(pct) / 100.0)), max
 }
 
-// DKIM points = discovery (selectors, no wildcard). ENT subtree alone does not score (Pulse parity).
+// effectiveDMARCPct is the RFC 7489 pct applied to mail-profile scoring.
+// Pct>0 is used as-is. Pct==0 with no pct= tag in Raw is omitted → default 100.
+// An explicit pct=0 (any case) is 0.
+func effectiveDMARCPct(dmarc *report.DMARCResult) int {
+	if dmarc == nil {
+		return 100
+	}
+	if dmarc.Pct > 0 {
+		if dmarc.Pct > 100 {
+			return 100
+		}
+		return dmarc.Pct
+	}
+	if pct, ok := parseRawDMARCPct(dmarc.Raw); ok {
+		if pct < 0 {
+			return 0
+		}
+		if pct > 100 {
+			return 100
+		}
+		return pct
+	}
+	return 100
+}
+
+func parseRawDMARCPct(raw string) (pct int, set bool) {
+	if raw == "" {
+		return 0, false
+	}
+	for _, part := range strings.Split(raw, ";") {
+		part = strings.TrimSpace(part)
+		eq := strings.IndexByte(part, '=')
+		if eq <= 0 {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(part[:eq]), "pct") {
+			continue
+		}
+		val := strings.TrimSpace(part[eq+1:])
+		if val == "" {
+			return 0, true
+		}
+		n, err := strconv.Atoi(val)
+		if err != nil {
+			return 0, true
+		}
+		return n, true
+	}
+	return 0, false
+}
+
+// DKIM: 10 only if at least one production key (SyntaxOK, not revoked, not t=y).
+// 0 if no selectors, wildcard, or only revoked/test keys. ENT subtree alone does not score.
 func scoreDKIM(dkim *report.DKIMResult) (earned, max int) {
 	max = MaxPointsDKIM
 	if dkim == nil || len(dkim.SelectorsFound) == 0 || dkim.WildcardDetected {
 		return 0, max
 	}
-	return max, max
+	for _, k := range dkim.Keys {
+		if k.SyntaxOK && !k.Revoked && !k.TestKey {
+			return max, max
+		}
+	}
+	return 0, max
 }
 
 // MTA-STS tier: 0 / 5 (DNS) / 10 (policy body) / 15 (RFC 8461 full pass).
@@ -350,10 +419,11 @@ func scoreTLSRPT(tlsrpt *report.TLSRPTResult) (earned, max int) {
 	return 5, max
 }
 
-// scoreDANE awards tiered DANE points:
-// - 0 when no TLSA is advertised
-// - 5 when TLSA is present for any MX host
-// - 10 when all MX hosts are covered, syntax is OK, and DNSSECValidated (set post-enrich)
+// scoreDANE awards tiered DANE points (DNS TLSA only; no SMTP or certificate match):
+//   - 0 when no TLSA is advertised
+//   - 5 when TLSA is present for any MX host
+//   - 10 when all MX hosts are covered, syntax is OK, and DNSSECValidated
+//     (DS+DNSKEY+resolver AD observed; set post-enrich)
 func scoreDANE(dane *report.DANEResult) (earned, max int) {
 	max = MaxPointsDANE
 	if dane == nil || len(dane.AdvertisedFor) == 0 {
@@ -383,6 +453,7 @@ func dnssecEarnedPoints(dnssec *report.DNSSECResult, max int) int {
 }
 
 // scoreDNSSEC awards half points for DS only and full points for DS+DNSKEY+resolver AD.
+// SecLens does not perform its own cryptographic chain validation and opens no DNS TCP.
 func scoreDNSSEC(dnssec *report.DNSSECResult) (earned, max int) {
 	max = MaxPointsDNSSEC
 	return dnssecEarnedPoints(dnssec, max), max
