@@ -225,8 +225,8 @@ func TestNewDoHClientNoRedirectNoEnvProxy(t *testing.T) {
 func TestMxFromDoH(t *testing.T) {
 	t.Run("nxdomain", func(t *testing.T) {
 		got, err := mxFromDoH(3, "10 mail.example.com.")
-		if err != nil || got != nil {
-			t.Fatalf("got (%v, %v) want (nil, nil)", got, err)
+		if !errors.Is(err, errMXNXDOMAIN) || got != nil {
+			t.Fatalf("got (%v, %v) want (nil, errMXNXDOMAIN)", got, err)
 		}
 	})
 	t.Run("nodata", func(t *testing.T) {
@@ -260,6 +260,140 @@ func TestMxFromDoH(t *testing.T) {
 }
 
 const mxAnswerBody = `{"Status":0,"AD":false,"Answer":[{"name":"example.com.","type":15,"TTL":30,"data":"10 mail.example.com."}]}`
+
+func dohRR(typ int, data string) struct {
+	Name string `json:"name"`
+	Type int    `json:"type"`
+	TTL  int    `json:"TTL"`
+	Data string `json:"data"`
+} {
+	return struct {
+		Name string `json:"name"`
+		Type int    `json:"type"`
+		TTL  int    `json:"TTL"`
+		Data string `json:"data"`
+	}{Name: "example.com.", Type: typ, TTL: 30, Data: data}
+}
+
+func TestPreferDoHResponse_QTypeBeatsRicherCNAME(t *testing.T) {
+	cname := &DoHResponse{Status: 0, AD: true, Answer: []struct {
+		Name string `json:"name"`
+		Type int    `json:"type"`
+		TTL  int    `json:"TTL"`
+		Data string `json:"data"`
+	}{
+		dohRR(5, "alias.example.net."),
+		dohRR(5, "alias2.example.net."),
+	}}
+	mx := &DoHResponse{Status: 0, AD: false, Answer: []struct {
+		Name string `json:"name"`
+		Type int    `json:"type"`
+		TTL  int    `json:"TTL"`
+		Data string `json:"data"`
+	}{
+		dohRR(15, "10 mail.example.com."),
+	}}
+	if !preferDoHResponse(mx, cname, 15) {
+		t.Fatal("MX answer must beat a CNAME-only response with more RRs and AD")
+	}
+	if preferDoHResponse(cname, mx, 15) {
+		t.Fatal("CNAME-only response must not beat an answer of the queried type")
+	}
+}
+
+func TestPreferDoHResponse_MoreAnswersThenAD(t *testing.T) {
+	oneAD := &DoHResponse{Status: 0, AD: true, Answer: []struct {
+		Name string `json:"name"`
+		Type int    `json:"type"`
+		TTL  int    `json:"TTL"`
+		Data string `json:"data"`
+	}{dohRR(15, "10 only.example.com.")}}
+	two := &DoHResponse{Status: 0, AD: false, Answer: []struct {
+		Name string `json:"name"`
+		Type int    `json:"type"`
+		TTL  int    `json:"TTL"`
+		Data string `json:"data"`
+	}{
+		dohRR(15, "10 a.example.com."),
+		dohRR(15, "20 b.example.com."),
+	}}
+	if !preferDoHResponse(two, oneAD, 15) {
+		t.Fatal("more answers of the queried type must beat a shorter AD answer")
+	}
+	sameAD := &DoHResponse{Status: 0, AD: true, Answer: []struct {
+		Name string `json:"name"`
+		Type int    `json:"type"`
+		TTL  int    `json:"TTL"`
+		Data string `json:"data"`
+	}{dohRR(15, "10 only.example.com.")}}
+	samePlain := &DoHResponse{Status: 0, AD: false, Answer: []struct {
+		Name string `json:"name"`
+		Type int    `json:"type"`
+		TTL  int    `json:"TTL"`
+		Data string `json:"data"`
+	}{dohRR(15, "10 other.example.com.")}}
+	if !preferDoHResponse(sameAD, samePlain, 15) {
+		t.Fatal("equal answer counts must prefer AD")
+	}
+}
+
+func TestDoQueryCNAMEOnlyDoesNotCancelPool(t *testing.T) {
+	var secondHits atomic.Int32
+	cnameBody := `{"Status":0,"AD":true,"Answer":[{"name":"example.com.","type":5,"TTL":30,"data":"alias.example.net."},{"name":"example.com.","type":5,"TTL":30,"data":"alias2.example.net."}]}`
+	mxBody := `{"Status":0,"AD":false,"Answer":[{"name":"example.com.","type":15,"TTL":30,"data":"10 mail.example.com."}]}`
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/dns-json")
+		_, _ = io.WriteString(w, cnameBody)
+	}))
+	defer first.Close()
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secondHits.Add(1)
+		w.Header().Set("Content-Type", "application/dns-json")
+		_, _ = io.WriteString(w, mxBody)
+	}))
+	defer second.Close()
+
+	c := NewDoHClient("cloudflare")
+	c.baseURLs = []string{first.URL, second.URL}
+	c.retryCount = 0
+	mx, err := c.LookupMX(context.Background(), "example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondHits.Load() == 0 {
+		t.Fatal("CNAME-only answer cancelled the pool before the peer was queried")
+	}
+	if len(mx) != 1 || mx[0].Host != "mail.example.com" {
+		t.Fatalf("mx=%v, want mail.example.com", mx)
+	}
+}
+
+func TestDoQueryNonADDoesNotCancelPeerAD(t *testing.T) {
+	plain := `{"Status":0,"AD":false,"Answer":[{"name":"example.com.","type":15,"TTL":30,"data":"10 mail.example.com."}]}`
+	validated := `{"Status":0,"AD":true,"Answer":[{"name":"example.com.","type":15,"TTL":30,"data":"10 mail.example.com."}]}`
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(40 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/dns-json")
+		_, _ = io.WriteString(w, plain)
+	}))
+	defer first.Close()
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/dns-json")
+		_, _ = io.WriteString(w, validated)
+	}))
+	defer second.Close()
+
+	c := NewDoHClient("cloudflare")
+	c.baseURLs = []string{first.URL, second.URL}
+	c.retryCount = 0
+	dr, err := c.doQuery(context.Background(), "example.com", 15)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dr == nil || !dr.AD {
+		t.Fatal("non-AD MX answer cancelled the peer that had AD")
+	}
+}
 
 func TestDoHHedgeSkipsSecondWhenFirstHasAnswers(t *testing.T) {
 	var secondHits atomic.Int32

@@ -88,10 +88,23 @@ func parentZoneCandidates(domain string) []string {
 //
 // TLD DNSSEC support changes on the order of years, so caching definitive answers is safe and
 // still avoids hammering DoH on bulk runs once a zone has been classified.
+// A cached Yes is never replaced by a later No. Concurrent probes for one client and zone share
+// a single flight.
 var (
 	zoneDNSSECCacheMu sync.Mutex
 	zoneDNSSECCache   = map[DNS]map[string]zoneSupport{}
+	zoneDNSSECFlight  = map[dnsZoneKey]*zoneFlight{}
 )
+
+type dnsZoneKey struct {
+	dns  DNS
+	zone string
+}
+
+type zoneFlight struct {
+	done chan struct{}
+	res  zoneSupport
+}
 
 // probeAnswer classifies a single LookupRRWithMeta outcome.
 // hasRR: answer contained records.
@@ -144,6 +157,7 @@ func apexDNSKEYProbe(ctx context.Context, zone string, dns DNS) (hasKEY bool, in
 }
 
 func zoneDNSSECSupport(ctx context.Context, zone string, dns DNS) zoneSupport {
+	key := dnsZoneKey{dns: dns, zone: zone}
 	zoneDNSSECCacheMu.Lock()
 	if byZone, ok := zoneDNSSECCache[dns]; ok {
 		if v, ok := byZone[zone]; ok {
@@ -151,21 +165,39 @@ func zoneDNSSECSupport(ctx context.Context, zone string, dns DNS) zoneSupport {
 			return v
 		}
 	}
+	if flight, ok := zoneDNSSECFlight[key]; ok {
+		zoneDNSSECCacheMu.Unlock()
+		<-flight.done
+		return flight.res
+	}
+	flight := &zoneFlight{done: make(chan struct{})}
+	zoneDNSSECFlight[key] = flight
 	zoneDNSSECCacheMu.Unlock()
 
 	result := probeZoneDNSSEC(ctx, zone, dns)
 
-	// Never cache unknowns (errors / SERVFAIL): the next domain under this TLD must re-probe.
+	zoneDNSSECCacheMu.Lock()
+	delete(zoneDNSSECFlight, key)
+	result = storeZoneSupport(dns, zone, result)
+	flight.res = result
+	close(flight.done)
+	zoneDNSSECCacheMu.Unlock()
+	return result
+}
+
+// storeZoneSupport records a definitive probe. Unknown is not stored.
+// A later No does not replace a cached Yes. Caller holds zoneDNSSECCacheMu.
+func storeZoneSupport(dns DNS, zone string, result zoneSupport) zoneSupport {
 	if result == zoneSupportUnknown {
 		return result
 	}
-
-	zoneDNSSECCacheMu.Lock()
 	if zoneDNSSECCache[dns] == nil {
 		zoneDNSSECCache[dns] = map[string]zoneSupport{}
 	}
+	if prev, ok := zoneDNSSECCache[dns][zone]; ok && prev == zoneSupportYes && result == zoneSupportNo {
+		return prev
+	}
 	zoneDNSSECCache[dns][zone] = result
-	zoneDNSSECCacheMu.Unlock()
 	return result
 }
 
@@ -196,11 +228,15 @@ func probeZoneDNSSEC(ctx context.Context, zone string, dns DNS) zoneSupport {
 
 // ParentSupportsDNSSEC reports whether the assessed domain's parent chain can publish DS records.
 //
-// Definitive "yes" from any parent candidate wins immediately.
-// Definitive "no" from all candidates (and no unknown) → false.
-// Any inconclusive probe fails open (returns true) so rate-limits and SERVFAIL cannot
-// masquerade as "DNSSEC not applicable (TLD does not support DNSSEC)".
+// Definitive Yes from any candidate wins. If any candidate is definitive No and none is Yes,
+// the result is false. Unknown does not override No. Fail open only when every candidate is
+// unknown, so a rate-limit cannot masquerade as "TLD does not support DNSSEC" by itself.
+//
+// Apex DNSKEY counts only for a parent or TLD candidate. parentZoneCandidates includes the
+// assessed name (example.com → com and example.com). DNSKEY at that name is not parent support.
+// DS at that name still is, because the parent published it.
 func ParentSupportsDNSSEC(ctx context.Context, domain string, dns DNS) bool {
+	domain = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(domain), "."))
 	candidates := parentZoneCandidates(domain)
 	if len(candidates) == 0 {
 		return false
@@ -209,17 +245,36 @@ func ParentSupportsDNSSEC(ctx context.Context, domain string, dns DNS) bool {
 	sawNo := false
 	sawUnknown := false
 	for _, zone := range candidates {
-		switch zoneDNSSECSupport(ctx, zone, dns) {
+		var support zoneSupport
+		if zone == domain {
+			support = assessedDomainDSSupport(ctx, zone, dns)
+		} else {
+			support = zoneDNSSECSupport(ctx, zone, dns)
+		}
+		switch support {
 		case zoneSupportYes:
 			return true
 		case zoneSupportNo:
 			sawNo = true
-		case zoneSupportUnknown:
+		default:
 			sawUnknown = true
 		}
 	}
-	if sawUnknown {
-		return true
+	if sawNo {
+		return false
 	}
-	return !sawNo
+	return sawUnknown
+}
+
+// assessedDomainDSSupport asks only for DS at the name being assessed.
+// Apex DNSKEY is not parent-chain evidence for that name, and a No here must not
+// be written into the zone cache (a child may still treat this zone as a signed parent).
+func assessedDomainDSSupport(ctx context.Context, zone string, dns DNS) zoneSupport {
+	hasDS, _ := rootDSProbe(ctx, zone, dns)
+	if hasDS {
+		return zoneSupportYes
+	}
+	// Empty DS at the assessed name is not proof the parent is unsigned.
+	// Only a parent/TLD probe may return No.
+	return zoneSupportUnknown
 }

@@ -2,6 +2,7 @@ package assessor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -87,9 +88,12 @@ func Assess(ctx context.Context, domain string, opts AssessmentOpts) (report.Rep
 		Generated: time.Now().UTC(),
 	}
 
-	// MX first: mail | null_mx | no_mx profile and hosts for DKIM/MTA-STS/DANE.
-	// A hard LookupMX failure must not be treated as empty MX (no_mx dual-path).
+	// MX first: mail | null_mx | no_mx. NXDOMAIN is not a mail profile.
+	// Any other LookupMX failure must not be treated as empty MX (no_mx dual-path).
 	mxs, mxErr := DefaultClient.LookupMX(ctx, domain)
+	if errors.Is(mxErr, errMXNXDOMAIN) {
+		return report.Report{}, fmt.Errorf("domain does not exist")
+	}
 	if mxErr != nil {
 		r.Errors = append(r.Errors, fmt.Sprintf("MX DNS lookup failed: %v", mxErr))
 		r.MXs = nil
@@ -209,13 +213,14 @@ func Assess(ctx context.Context, domain string, opts AssessmentOpts) (report.Rep
 			r.DANE = &res.dane
 			r.DNSSEC = &res.dnssec
 		}
-		r.Errors = res.errs
+		r.Errors = append(r.Errors, res.errs...)
 		applyPostFanInEnrichment(&r)
 	case <-ctx.Done():
 		r.Errors = append(r.Errors, fmt.Sprintf("assessment timed out or cancelled: %v", ctx.Err()))
 	}
 	if mxOmitted > 0 {
 		r.Errors = append(r.Errors, fmt.Sprintf("MX host list capped at %d (lowest preference first); %d additional MX not assessed", maxAssessedMXHosts, mxOmitted))
+		constrainCappedMXChecks(&r)
 	}
 
 	PopulateCheckScores(&r)
@@ -225,6 +230,29 @@ func Assess(ctx context.Context, domain string, opts AssessmentOpts) (report.Rep
 	r.DNSTrace = dnsTrace.snapshot()
 
 	return r, nil
+}
+
+// constrainCappedMXChecks drops full-coverage claims when the MX host list was truncated.
+// Checks ran on the kept hosts only, so a pass over that subset is partial.
+func constrainCappedMXChecks(r *report.Report) {
+	if r == nil {
+		return
+	}
+	if d := r.DANE; d != nil && (d.MXCovered || d.Status == "pass") {
+		d.MXCovered = false
+		if d.Status == "pass" || d.Status == "info" {
+			d.Status = "warn"
+		}
+		d.Message = "DANE TLSA coverage is partial (MX host list capped)"
+	}
+	if m := r.MTASTS; m != nil && (m.MXCoverageOK || m.Status == "pass") {
+		wasPass := m.Status == "pass"
+		m.MXCoverageOK = false
+		if wasPass || m.Status == "info" {
+			m.Status = "warn"
+			m.Message = "MTA-STS coverage is partial (MX host list capped)"
+		}
+	}
 }
 
 // applyPostFanInEnrichment runs cross-check and recommendation steps after parallel
@@ -289,11 +317,14 @@ func RunBulk(ctx context.Context, domains []string, opts AssessmentOpts, concurr
 	}
 	wg.Wait()
 
-	// attach any top level errs into the report
 	for i := range reports {
-		if errs[i] != nil && reports[i].Domain != "" {
-			reports[i].Errors = append(reports[i].Errors, errs[i].Error())
+		if errs[i] == nil {
+			continue
 		}
+		if reports[i].Domain == "" {
+			reports[i].Domain = domains[i]
+		}
+		reports[i].Errors = append(reports[i].Errors, errs[i].Error())
 	}
 	return reports
 }
