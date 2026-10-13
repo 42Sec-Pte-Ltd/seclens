@@ -217,9 +217,34 @@ func betterDoHResponse(a, b *DoHResponse) bool {
 	return a.AD && !b.AD
 }
 
+func dohAnswerHasQType(dr *DoHResponse, qtype uint16) bool {
+	if dr == nil {
+		return false
+	}
+	want := int(qtype)
+	for i := range dr.Answer {
+		if dr.Answer[i].Type == want {
+			return true
+		}
+	}
+	return false
+}
+
+// preferDoHResponse reports whether a should replace b for this query.
+// A response that contains the queried type beats one that does not.
+// Two complete answers, or two incomplete ones, stay on betterDoHResponse.
+func preferDoHResponse(a, b *DoHResponse, qtype uint16) bool {
+	aHas := dohAnswerHasQType(a, qtype)
+	bHas := dohAnswerHasQType(b, qtype)
+	if aHas != bHas {
+		return aHas
+	}
+	return betterDoHResponse(a, b)
+}
+
 // doQuery executes a DoH request. A provider pool starts the first URL immediately
-// and hedges the rest after dohHedgeDelay if no decoded response has arrived, so a
-// flake still fails over without doubling TLS/DoH load on the fast path.
+// and hedges the rest after dohHedgeDelay until an RR of the queried type arrives.
+// A CNAME-only answer must not cancel peers that may still hold that type.
 // When the context carries a dnsTraceCollector (see withDNSTrace), started
 // provider outcomes including the raw JSON bodies are recorded for traceability.
 func (c *DoHClient) doQuery(ctx context.Context, name string, qtype uint16) (*DoHResponse, error) {
@@ -261,11 +286,11 @@ func (c *DoHClient) doQuery(ctx context.Context, name string, qtype uint16) (*Do
 		startOne(0)
 		started := 1
 		collected := 0
-		hasAnswers := false
+		hasQType := false
 		hedge := time.NewTimer(dohHedgeDelay)
 		defer hedge.Stop()
-		for collected < started || (!hasAnswers && started < len(c.baseURLs)) {
-			if collected == started && !hasAnswers && started < len(c.baseURLs) {
+		for collected < started || (!hasQType && started < len(c.baseURLs)) {
+			if collected == started && !hasQType && started < len(c.baseURLs) {
 				startOne(started)
 				started++
 				if started < len(c.baseURLs) {
@@ -277,12 +302,28 @@ func (c *DoHClient) doQuery(ctx context.Context, name string, qtype uint16) (*Do
 			case o := <-ch:
 				collected++
 				outs[o.idx] = o
-				if o.dr != nil && dohResponseRank(o.dr) >= 4 {
-					hasAnswers = true
-					cancel()
+				if dohAnswerHasQType(o.dr, qtype) {
+					hasQType = true
+					if o.dr != nil && o.dr.AD {
+						cancel()
+					} else {
+						// Peers already started may still carry AD. Stop new
+						// hedges and cancel the rest after one more delay.
+						if !hedge.Stop() {
+							select {
+							case <-hedge.C:
+							default:
+							}
+						}
+						hedge.Reset(dohHedgeDelay)
+					}
 				}
 			case <-hedge.C:
-				if !hasAnswers && started < len(c.baseURLs) {
+				if hasQType {
+					cancel()
+					continue
+				}
+				if started < len(c.baseURLs) {
 					startOne(started)
 					started++
 					if started < len(c.baseURLs) {
@@ -298,7 +339,7 @@ func (c *DoHClient) doQuery(ctx context.Context, name string, qtype uint16) (*Do
 		if outs[i].dr == nil {
 			continue
 		}
-		if bestIdx == -1 || betterDoHResponse(outs[i].dr, outs[bestIdx].dr) {
+		if bestIdx == -1 || preferDoHResponse(outs[i].dr, outs[bestIdx].dr, qtype) {
 			bestIdx = i
 		}
 	}
@@ -442,7 +483,8 @@ func (c *DoHClient) lookupTXTFollow(ctx context.Context, name string, depth int)
 
 // LookupMX returns MX records for the name (type 15).
 // Data format from DoH is usually "10 mail.example.com." (preference + host).
-// Transport errors and non-NOERROR/NXDOMAIN RCODEs (e.g. SERVFAIL) return an error
+// NODATA (NOERROR, no answers) is an empty MX set.
+// NXDOMAIN is errMXNXDOMAIN. Transport errors and any other RCODE are errors
 // so callers do not treat resolver failure as empty MX.
 func (c *DoHClient) LookupMX(ctx context.Context, name string) ([]report.MXRecord, error) {
 	dr, err := c.doQuery(ctx, name, 15)
@@ -458,12 +500,16 @@ func (c *DoHClient) LookupMX(ctx context.Context, name string) ([]report.MXRecor
 	return mxFromDoH(dr.Status, answers...)
 }
 
+// errMXNXDOMAIN is MX RCODE 3. NODATA (NOERROR, no answers) is not this error.
+var errMXNXDOMAIN = errors.New("mx nxdomain")
+
 // mxFromDoH maps a DoH MX RCODE + rdata into records.
-// NXDOMAIN and NOERROR/NODATA are true empty MX; any other RCODE is an error.
+// RCODE 3 is errMXNXDOMAIN. NOERROR with no answers is empty MX.
+// Any other RCODE is an error.
 func mxFromDoH(status int, answers ...string) ([]report.MXRecord, error) {
 	switch status {
 	case 3: // NXDOMAIN
-		return nil, nil
+		return nil, errMXNXDOMAIN
 	case 0: // NOERROR (including NODATA)
 		var out []report.MXRecord
 		for _, data := range answers {

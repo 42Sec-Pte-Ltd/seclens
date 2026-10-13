@@ -2,6 +2,7 @@ package assessor
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -68,8 +69,9 @@ func TestLookupMXRcodeIntegrity(t *testing.T) {
 		body    string
 		wantN   int
 		wantErr bool
+		wantNX  bool
 	}{
-		{name: "nxdomain", body: `{"Status":3}`, wantN: 0},
+		{name: "nxdomain", body: `{"Status":3}`, wantNX: true},
 		{name: "nodata", body: `{"Status":0,"Answer":[]}`, wantN: 0},
 		{name: "ok", body: `{"Status":0,"Answer":[{"name":"example.com","type":15,"TTL":300,"data":"10 mail.example.com."}]}`, wantN: 1},
 		{name: "servfail", body: `{"Status":2}`, wantErr: true},
@@ -81,9 +83,18 @@ func TestLookupMXRcodeIntegrity(t *testing.T) {
 			defer srv.Close()
 			c := newTestPoolClient(srv.URL)
 			mxs, err := c.LookupMX(context.Background(), "example.com")
+			if tt.wantNX {
+				if !errors.Is(err, errMXNXDOMAIN) || mxs != nil {
+					t.Fatalf("got (%v, %v) want (nil, errMXNXDOMAIN)", mxs, err)
+				}
+				return
+			}
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("expected rcode error")
+				}
+				if errors.Is(err, errMXNXDOMAIN) {
+					t.Fatal("SERVFAIL/REFUSED must not be NXDOMAIN")
 				}
 				return
 			}
