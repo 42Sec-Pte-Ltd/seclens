@@ -64,10 +64,16 @@ jobs:
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
           go install honnef.co/go/tools/cmd/staticcheck@latest
-          # Release v2.29.0 pins x/tools v0.49.0, which cannot read Go 1.27
-          # export data and exits 1 with Issues: 0. This commit uses x/tools v0.52.0.
-          go install github.com/securego/gosec/v2/cmd/gosec@v2.29.1-0.20261012130337-71577268350e
+          go install github.com/securego/gosec/v2/cmd/gosec@latest
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          # Tagged gosec can lag the Go export format and exit 1 with Issues: 0.
+          dir="$(mktemp -d)"
+          printf 'package p\nimport "fmt"\nfunc F() { fmt.Println("x") }\n' >"$dir/p.go"
+          if ! (cd "$dir" && go mod init probe >/dev/null 2>&1 && gosec -fmt text .) >"$dir/log" 2>&1 \
+            && grep -q 'export data version' "$dir/log"; then
+            go install github.com/securego/gosec/v2/cmd/gosec@master
+          fi
+          rm -rf "$dir"
 
       - name: govulncheck
         run: govulncheck ./...
