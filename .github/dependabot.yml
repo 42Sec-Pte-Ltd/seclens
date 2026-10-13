@@ -1,26 +1,16 @@
-# Keep Go modules and GitHub Actions up to date.
+# Version updates are paused. Dependabot must not open pull requests,
+# branches, or commits. Vulnerability alerts stay on the Security tab.
+# Automated security-fix pull requests are disabled in the repo settings.
 version: 2
 updates:
   - package-ecosystem: gomod
     directory: /
     schedule:
       interval: weekly
-      day: monday
-    open-pull-requests-limit: 5
-    labels:
-      - dependencies
-      - security
+    open-pull-requests-limit: 0
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
-      day: monday
-    open-pull-requests-limit: 5
-    labels:
-      - dependencies
-      - github-actions
-    # codeql-action majors stay manual (init/autobuild/analyze must move together).
-    ignore:
-      - dependency-name: "github/codeql-action"
-        update-types: ["version-update:semver-major"]
+    open-pull-requests-limit: 0
