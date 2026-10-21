@@ -57,9 +57,10 @@ type RR struct {
 
 // QueryResult carries DNS answers plus DoH metadata (RFC 4035 AD bit, RCODE).
 type QueryResult struct {
-	RRs    []RR
-	AD     bool
-	Status int
+	RRs           []RR
+	AD            bool
+	Status        int
+	ADUnavailable bool
 }
 
 // DoHClient is JSON-DoH (stdlib only). Multi-URL clients fan out and pick the best answer
@@ -555,7 +556,7 @@ func (c *DoHClient) LookupRRWithMeta(ctx context.Context, name string, qtype uin
 			TTL:  a.TTL,
 		})
 	}
-	return QueryResult{RRs: out, AD: dr.AD, Status: dr.Status}, nil
+	return QueryResult{RRs: out, AD: dr.AD, Status: dr.Status, ADUnavailable: !c.reportsAD()}, nil
 }
 
 // LookupRR performs a generic query and returns raw RR data for the requested type.
@@ -821,13 +822,35 @@ func init() {
 	}
 }
 
+// dnsResolver is the lookup surface Assess uses.
+// DoH reports the AD bit. A system or host:port stub does not.
+type dnsResolver interface {
+	LookupTXT(ctx context.Context, name string) ([]string, error)
+	LookupTXTMeta(ctx context.Context, name string) ([]string, int, error)
+	LookupMX(ctx context.Context, name string) ([]report.MXRecord, error)
+	LookupRRWithMeta(ctx context.Context, name string, qtype uint16) (QueryResult, error)
+	LookupRR(ctx context.Context, name string, qtype uint16) ([]RR, error)
+	LookupNS(ctx context.Context, name string) ([]string, error)
+	resolveHostIPs(ctx context.Context, host string) ([]net.IP, error)
+	reportsAD() bool
+}
+
 // Default multi-provider pool (fan-out; best answer wins — Top-1M measurement parity).
 var (
-	DefaultClient = NewDoHClient("cloudflare,google")
+	DefaultClient dnsResolver = NewDoHClient("cloudflare,google")
 
 	defaultResolverMu  sync.Mutex
 	defaultResolverKey = "cloudflare,google"
 )
+
+func (c *DoHClient) reportsAD() bool { return true }
+
+func resolverReportsAD() bool {
+	if DefaultClient == nil {
+		return true
+	}
+	return DefaultClient.reportsAD()
+}
 
 // SetDefaultResolver sets the global DoH pool (CLI --resolver; comma-separated).
 // Same pool string is a no-op so bulk Assess jobs keep one Transport and reuse
@@ -842,6 +865,18 @@ func SetDefaultResolver(provider string) {
 	if provider == defaultResolverKey && DefaultClient != nil {
 		return
 	}
-	DefaultClient = NewDoHClient(provider)
+	switch kind, addr := classifyResolver(provider); kind {
+	case resolverSystem:
+		a, err := systemResolverAddr()
+		if err != nil {
+			DefaultClient = &stubClient{initErr: err}
+		} else {
+			DefaultClient = &stubClient{addr: a}
+		}
+	case resolverStub:
+		DefaultClient = &stubClient{addr: addr}
+	default:
+		DefaultClient = NewDoHClient(provider)
+	}
 	defaultResolverKey = provider
 }

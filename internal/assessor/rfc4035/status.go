@@ -15,18 +15,26 @@ func ApplyStatus(res *report.DNSSECResult) {
 		res.Message = notApplicableMessage
 		return
 	}
-	if res.DSPresent && res.DNSKEYPresent && resolverValidated(res) {
+	adNA := res.ADCheck == report.ADCheckNA
+	if res.DSPresent && res.DNSKEYPresent && (adNA || resolverValidated(res)) {
 		res.Status = "pass"
-		res.Message = "DNSSEC enabled (DS + DNSKEY published; resolver AD observed)"
+		if adNA {
+			res.Message = "DNSSEC enabled (DS + DNSKEY published; AD bit n/a on this resolver)"
+		} else {
+			res.Message = "DNSSEC enabled (DS + DNSKEY published; resolver AD observed)"
+		}
 		return
 	}
 	if res.DSPresent {
 		res.Status = "warn"
-		if resolverValidated(res) && !res.DNSKEYPresent {
+		switch {
+		case adNA && !res.DNSKEYPresent:
+			res.Message = "DNSSEC partially configured (DS present; DNSKEY missing; AD bit n/a)"
+		case resolverValidated(res) && !res.DNSKEYPresent:
 			res.Message = "DNSSEC partially configured (DS + resolver AD observed; DNSKEY missing)"
-		} else if res.DNSKEYPresent && !resolverValidated(res) {
+		case res.DNSKEYPresent && !resolverValidated(res):
 			res.Message = "DNSSEC partially configured (DS + DNSKEY present; resolver AD not observed)"
-		} else {
+		default:
 			res.Message = "DNSSEC partially configured (DS present; DNSKEY or resolver AD not observed)"
 		}
 		return

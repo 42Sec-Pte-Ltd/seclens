@@ -52,6 +52,7 @@ Examples:
 Control set aligned with the SecLens Top-1M study
 https://seclens.one/research/2026-07-email-security-top1m/
 (SPF/DMARC/MTA-STS full policy validation, DNSSEC, DANE/TLSA, DKIM, TLS-RPT).
+BIMI is reported and not scored.
 `)
 }
 

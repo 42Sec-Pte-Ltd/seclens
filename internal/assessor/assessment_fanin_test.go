@@ -64,11 +64,21 @@ func TestAssess_MXNXDOMAIN(t *testing.T) {
 	installTestDoH(t, srv)
 
 	r, err := Assess(context.Background(), domain, AssessmentOpts{Timeout: 5 * time.Second})
-	if err == nil || err.Error() != "domain does not exist" {
+	if err != nil {
 		t.Fatalf("err=%v", err)
 	}
-	if r.Domain != "" || r.Profile != "" || r.SPF != nil || r.DMARC != nil || len(r.Errors) != 0 {
+	if r.Domain != domain || r.Profile != ProfileNXDOMAIN || r.Status != "nxdomain" || r.Message != "not assessable" {
 		t.Fatalf("report=%+v", r)
+	}
+	if r.Score != 0 || r.Band != "" || r.SPF != nil || r.DMARC != nil {
+		t.Fatalf("nxdomain must not be scored: %+v", r)
+	}
+	if len(r.Errors) != 1 || r.Errors[0] != "domain does not exist" {
+		t.Fatalf("errors=%v", r.Errors)
+	}
+	raw := r.ToJSON()
+	if strings.Contains(string(raw), `"Score"`) || strings.Contains(string(raw), `"band"`) {
+		t.Fatalf("json leaked score or band: %s", raw)
 	}
 }
 

@@ -84,6 +84,30 @@ var scoringStatusMatrix = []struct {
 	},
 	{
 		protocol:   "DMARC",
+		name:       "warn reject sp=none deducts 5",
+		status:     "warn",
+		wantEarned: 20,
+		wantMax:    MaxPointsDMARC,
+		build: func() *report.Report {
+			return &report.Report{DMARC: &report.DMARCResult{
+				Present: true, Policy: "reject", SubPolicy: "none", Status: "warn", SyntaxOK: true,
+			}}
+		},
+	},
+	{
+		protocol:   "DMARC",
+		name:       "warn quarantine sp=none deducts 5",
+		status:     "warn",
+		wantEarned: 10,
+		wantMax:    MaxPointsDMARC,
+		build: func() *report.Report {
+			return &report.Report{DMARC: &report.DMARCResult{
+				Present: true, Policy: "quarantine", SubPolicy: "none", Status: "warn", SyntaxOK: true,
+			}}
+		},
+	},
+	{
+		protocol:   "DMARC",
 		name:       "warn reject no rua earns full policy points",
 		status:     "warn",
 		wantEarned: 25,

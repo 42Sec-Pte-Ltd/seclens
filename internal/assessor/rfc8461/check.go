@@ -10,8 +10,9 @@ import (
 
 // Request is the input for an RFC 8461 policy assessment.
 type Request struct {
-	Domain  string
-	MXHosts []string
+	Domain          string
+	MXHosts         []string
+	SkipPolicyFetch bool
 }
 
 // Check evaluates MTA-STS per RFC 8461 (DNS TXT + HTTPS policy + MX matching).
@@ -48,8 +49,17 @@ func Check(ctx context.Context, req Request, deps Deps) report.MTASTSResult {
 		res.Issues = append(res.Issues, "DNS _mta-sts TXT missing or has invalid id= (RFC 8461 §3.1 requires id= with 1–32 alphanumeric characters)")
 	}
 
+	if req.SkipPolicyFetch {
+		res.PolicyFetch = report.PolicyFetchNotFetched
+		res.PolicyFetched = false
+		res.Status = "warn"
+		res.Message = "MTA-STS advertised in DNS; policy not fetched"
+		return res
+	}
+
 	fetch, err := resolvePolicyFetch(ctx, deps, domain)
 	if err != nil {
+		res.PolicyFetch = report.PolicyFetchFailed
 		res.Issues = append(res.Issues, classifyFetchError(err))
 		res.Message = "MTA-STS advertised but policy fetch failed"
 		res.Status = "warn"
@@ -62,6 +72,7 @@ func Check(ctx context.Context, req Request, deps Deps) report.MTASTSResult {
 
 	res.RawPolicy = fetch.body
 	res.PolicyFetched = true
+	res.PolicyFetch = report.PolicyFetchFetched
 
 	policy := parsePolicyBody(fetch.body)
 	res.Version = policy.version
@@ -121,4 +132,3 @@ func Check(ctx context.Context, req Request, deps Deps) report.MTASTSResult {
 
 	return res
 }
-

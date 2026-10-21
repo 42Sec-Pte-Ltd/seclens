@@ -5,6 +5,7 @@ package assessor
 import (
 	"context"
 
+	"seclens/internal/assessor/bimi"
 	"seclens/internal/assessor/rfc4035"
 	"seclens/internal/assessor/rfc6376"
 	"seclens/internal/assessor/rfc7208"
@@ -26,6 +27,7 @@ var (
 	rfc7672Deps = rfc7672.Deps{DNS: daneDNS{}, Gate: stdGate{}}
 	rfc8460Deps = rfc8460.Deps{DNS: txtDNS{}, Gate: stdGate{}}
 	rfc8461Deps = rfc8461.Deps{DNS: mtastsDNS{}, Gate: stdGate{}, IPGuard: mtastsIPGuard{}}
+	bimiDeps    = bimi.Deps{DNS: mtastsDNS{}, Gate: stdGate{}, IPGuard: mtastsIPGuard{}}
 )
 
 // CheckDNSSEC — RFC 4034/4035.
@@ -88,5 +90,15 @@ func CheckTLSRPT(ctx context.Context, domain string) report.TLSRPTResult {
 
 // CheckMTASTS — RFC 8461.
 func CheckMTASTS(ctx context.Context, domain string, mxHosts []string) report.MTASTSResult {
-	return rfc8461.Check(ctx, rfc8461.Request{Domain: domain, MXHosts: mxHosts}, rfc8461Deps)
+	return checkMTASTS(ctx, domain, mxHosts, false)
+}
+
+func checkMTASTS(ctx context.Context, domain string, mxHosts []string, skipFetch bool) report.MTASTSResult {
+	return rfc8461.Check(ctx, rfc8461.Request{Domain: domain, MXHosts: mxHosts, SkipPolicyFetch: skipFetch}, rfc8461Deps)
+}
+
+// CheckBIMI is informational (draft-brand-indicators-for-message-identification).
+// dmarc is the result already computed for domain. Score functions ignore the return value.
+func CheckBIMI(ctx context.Context, domain string, dmarc *report.DMARCResult) report.BIMIResult {
+	return bimi.Check(ctx, bimi.Request{Domain: domain, DMARC: dmarc}, bimiDeps)
 }

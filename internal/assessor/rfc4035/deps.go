@@ -15,6 +15,9 @@ type QueryResult struct {
 	RRs    []RR
 	AD     bool
 	Status int
+	// ADUnavailable is set when the resolver cannot report the AD bit
+	// (system resolver or a plain host:port stub). A missing AD bit is then n/a.
+	ADUnavailable bool
 }
 
 // DNS performs DNS lookups for RFC 4035 DNSSEC chain checks.

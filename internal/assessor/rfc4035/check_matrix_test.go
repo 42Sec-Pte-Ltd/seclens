@@ -10,8 +10,8 @@ import (
 
 func TestCheck_Matrix(t *testing.T) {
 	const (
-		parentDS  = "2371 13 2 AABBCCDDEEFF00112233445566778899AABBCCDDEEFF00112233445566778899"
-		goodDS    = "2371 13 2 E9D6FAE1DAD409B0EE20831B6B70C03C773E41A8"
+		parentDS   = "2371 13 2 AABBCCDDEEFF00112233445566778899AABBCCDDEEFF00112233445566778899"
+		goodDS     = "2371 13 2 E9D6FAE1DAD409B0EE20831B6B70C03C773E41A8"
 		goodDNSKEY = "257 3 13 AwEAAc6h7Rfk3A1D0u1i0vYrK8mH3uG8o0o0o0o0o0o0o0o0o0o0o0o0o0o0"
 	)
 
@@ -146,7 +146,8 @@ func TestProbeAD_DSFallback(t *testing.T) {
 			qtypeDS:  {AD: true, Status: 0, RRs: []RR{{Data: goodDS}}},
 		},
 	}}
-	if !ProbeAD(context.Background(), domain, dns) {
+	ad, unavailable := ProbeAD(context.Background(), domain, dns)
+	if unavailable || !ad {
 		t.Fatal("expected AD from DS fallback when TXT is NXDOMAIN")
 	}
 }

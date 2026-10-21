@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"testing"
 
+	"seclens/internal/assessor/rfc7489"
 	"seclens/internal/report"
 )
 
@@ -318,6 +319,43 @@ func TestScoreSPF(t *testing.T) {
 	}
 }
 
+func TestScoreDMARCNullMXRejectSPNone(t *testing.T) {
+	dmarc := &report.DMARCResult{Policy: "reject", SubPolicy: "none", SyntaxOK: true}
+	earned, max := scoreDMARCNullMX(dmarc, MaxPointsNullMXDMARC)
+	if max != 35 || earned != 30 {
+		t.Fatalf("null-mx reject sp=none: got %d/%d want 30/35", earned, max)
+	}
+	full, _ := scoreDMARCNullMX(&report.DMARCResult{Policy: "reject", SyntaxOK: true}, MaxPointsNullMXDMARC)
+	if full != 35 {
+		t.Fatalf("null-mx reject without sp=none: got %d want 35", full)
+	}
+	q, qmax := scoreDMARCNullMX(&report.DMARCResult{Policy: "quarantine", SubPolicy: "none", SyntaxOK: true}, MaxPointsNullMXDMARC)
+	if q != 0 || qmax != 35 {
+		t.Fatalf("null-mx quarantine sp=none: got %d/%d want 0/35", q, qmax)
+	}
+}
+
+func TestQuarantineSPNoneCostsFiveAndWarns(t *testing.T) {
+	const issue = "sp=none (subdomains have no DMARC protection) — weakens subdomain coverage even if p= is strong"
+	res := rfc7489.AnalyzeRaw("v=DMARC1; p=quarantine; sp=none; rua=mailto:r@example.com; pct=100", false)
+	if res.Status != "warn" {
+		t.Fatalf("status %q want warn, issues %q", res.Status, res.Issues)
+	}
+	found := false
+	for _, iss := range res.Issues {
+		if iss == issue {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("issues %q want %q", res.Issues, issue)
+	}
+	earned, max := scoreDMARC(&res)
+	if earned != 10 || max != 25 {
+		t.Fatalf("earned %d/%d want 10/25", earned, max)
+	}
+}
+
 func TestScoreDMARC(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -337,13 +375,33 @@ func TestScoreDMARC(t *testing.T) {
 			earned: 0,
 		},
 		{
-			name: "sp=none does not affect score",
+			name: "quarantine sp=none deducts 5",
 			dmarc: &report.DMARCResult{
 				Policy:    "quarantine",
 				SubPolicy: "none",
 				SyntaxOK:  true,
 			},
-			earned: 15,
+			earned: 10,
+		},
+		{
+			name: "quarantine pct=10 sp=none floors at 0",
+			dmarc: &report.DMARCResult{
+				Policy:    "quarantine",
+				SubPolicy: "none",
+				SyntaxOK:  true,
+				Pct:       10,
+				Raw:       "v=DMARC1; p=quarantine; pct=10",
+			},
+			earned: 0,
+		},
+		{
+			name: "reject sp=none deducts 5",
+			dmarc: &report.DMARCResult{
+				Policy:    "reject",
+				SubPolicy: "none",
+				SyntaxOK:  true,
+			},
+			earned: 20,
 		},
 		{
 			name: "reject omitted pct is RFC default 100",
@@ -661,6 +719,53 @@ func TestSPFRedirectScoringLeniency(t *testing.T) {
 	res2 := &report.SPFResult{HasRedirect: true, RedirectDepth: 11}
 	if res2.RedirectDepth <= 10 {
 		t.Error("expected depth >10 to be detectable for recommendation")
+	}
+}
+
+func TestBIMIDoesNotChangeScore(t *testing.T) {
+	mxs := []report.MXRecord{{Pref: 0, Host: "."}}
+	base := func() report.Report {
+		return report.Report{
+			Profile: "null_mx",
+			MXs:     mxs,
+			NullMX:  &report.NullMXResult{Status: "pass"},
+			SPF:     &report.SPFResult{Present: true, Raw: "v=spf1 -all"},
+			DMARC:   &report.DMARCResult{Policy: "none", SyntaxOK: true},
+			DNSSEC:  &report.DNSSECResult{DSPresent: false, TLDSupported: true},
+		}
+	}
+	without := base()
+	with := base()
+	with.BIMI = &report.BIMIResult{
+		Status:   "present",
+		DNSName:  "default._bimi.example.com",
+		Location: "https://example.com/a.svg",
+		Findings: []string{"logo contains <script"},
+	}
+	PopulateCheckScores(&without)
+	PopulateCheckScores(&with)
+	if ComputeScore(without) != 50 || ComputeScore(with) != 50 {
+		t.Fatalf("score without=%d with=%d want 50", ComputeScore(without), ComputeScore(with))
+	}
+	if ComputeApplicableMax(without) != 100 || ComputeApplicableMax(with) != 100 {
+		t.Fatalf("max without=%d with=%d want 100", ComputeApplicableMax(without), ComputeApplicableMax(with))
+	}
+	if without.DMARC.EarnedPoints != with.DMARC.EarnedPoints || without.SPF.EarnedPoints != with.SPF.EarnedPoints {
+		t.Fatalf("point fields changed without dmarc=%d spf=%d with dmarc=%d spf=%d",
+			without.DMARC.EarnedPoints, without.SPF.EarnedPoints, with.DMARC.EarnedPoints, with.SPF.EarnedPoints)
+	}
+
+	mail := report.Report{
+		Profile: "mail",
+		SPF:     &report.SPFResult{Present: true, Status: "pass", AllQualifier: "-", LookupCount: 1},
+		DMARC:   &report.DMARCResult{Policy: "reject", SyntaxOK: true},
+	}
+	mailWith := mail
+	mailWith.BIMI = &report.BIMIResult{Status: "absent"}
+	PopulateCheckScores(&mail)
+	PopulateCheckScores(&mailWith)
+	if ComputeScore(mail) != ComputeScore(mailWith) || ComputeApplicableMax(mail) != ComputeApplicableMax(mailWith) {
+		t.Fatalf("mail score %d/%d vs %d/%d", ComputeScore(mail), ComputeApplicableMax(mail), ComputeScore(mailWith), ComputeApplicableMax(mailWith))
 	}
 }
 

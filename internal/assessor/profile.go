@@ -5,14 +5,17 @@ import (
 	"seclens/internal/report"
 )
 
-// Three inbound profiles:
-//   mail    — at least one real (non-null) MX; full mail stack
-//   null_mx — null MX declared (RFC 7505), no real inbound path
-//   no_mx   — no MX published at all (path not chosen yet)
+// Inbound profiles, plus nxdomain (the name does not exist and is not scored):
+//
+//	mail     — at least one real (non-null) MX; full mail stack
+//	null_mx  — null MX declared (RFC 7505), no real inbound path
+//	no_mx    — no MX published at all (path not chosen yet)
+//	nxdomain — NXDOMAIN; no score and no band
 const (
-	ProfileMail   = "mail"
-	ProfileNullMX = "null_mx"
-	ProfileNoMX   = "no_mx"
+	ProfileMail     = "mail"
+	ProfileNullMX   = "null_mx"
+	ProfileNoMX     = "no_mx"
+	ProfileNXDOMAIN = "nxdomain"
 )
 
 // ProfileFromMXs maps the MX set to one of the three profiles.

@@ -1,10 +1,12 @@
 package rfc8461
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"testing"
 
 	"seclens/internal/assessor/testutil"
@@ -69,6 +71,41 @@ func matrixDeps(txt []string, fetcher PolicyFetcher, gate Gate) Deps {
 		IPGuard:       publicIPGuard{},
 		PolicyFetcher: fetcher,
 	}
+}
+
+func TestCheckSkipPolicyFetch(t *testing.T) {
+	called := false
+	fetcher := PolicyFetcher(&failIfCalledFetcher{called: &called})
+	deps := matrixDeps([]string{"v=STSv1; id=20160831085700Z;"}, fetcher, testutil.AllowGate{})
+	res := Check(context.Background(), Request{
+		Domain:          matrixDomain,
+		MXHosts:         []string{"mx1.example.com"},
+		SkipPolicyFetch: true,
+	}, deps)
+	if called {
+		t.Fatal("policy fetcher ran")
+	}
+	if res.Status != "warn" || res.PolicyFetched || res.PolicyFetch != report.PolicyFetchNotFetched {
+		t.Fatalf("status=%s fetched=%v policyFetch=%q", res.Status, res.PolicyFetched, res.PolicyFetch)
+	}
+	if res.Message != "MTA-STS advertised in DNS; policy not fetched" {
+		t.Fatalf("message=%q", res.Message)
+	}
+	if !res.DNSAdvertised {
+		t.Fatal("DNS advertisement should still count")
+	}
+	var buf bytes.Buffer
+	report.Report{MTASTS: &res}.PrintText(&buf)
+	if !strings.Contains(buf.String(), "not fetched") {
+		t.Fatalf("text missing not fetched:\n%s", buf.String())
+	}
+}
+
+type failIfCalledFetcher struct{ called *bool }
+
+func (f *failIfCalledFetcher) FetchPolicy(context.Context, Deps, string) (policyFetchResult, error) {
+	*f.called = true
+	return policyFetchResult{}, errors.New("should not fetch")
 }
 
 func TestCheckMatrix(t *testing.T) {

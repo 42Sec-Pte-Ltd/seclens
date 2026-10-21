@@ -50,6 +50,8 @@ type AssessmentOpts struct {
 	Timeout  time.Duration
 	DoSMTP   bool // future: deep checks
 	Resolver string
+	// NoMTASTSFetch keeps MTA-STS to the DNS TXT. The policy file is not requested.
+	NoMTASTSFetch bool
 	// TraceDNS keeps multi-provider DoH provenance on the report (bulk JSONL usually leaves this off).
 	TraceDNS bool
 }
@@ -92,7 +94,14 @@ func Assess(ctx context.Context, domain string, opts AssessmentOpts) (report.Rep
 	// Any other LookupMX failure must not be treated as empty MX (no_mx dual-path).
 	mxs, mxErr := DefaultClient.LookupMX(ctx, domain)
 	if errors.Is(mxErr, errMXNXDOMAIN) {
-		return report.Report{}, fmt.Errorf("domain does not exist")
+		return report.Report{
+			Domain:    domain,
+			Generated: time.Now().UTC(),
+			Profile:   ProfileNXDOMAIN,
+			Status:    report.StatusNXDOMAIN,
+			Message:   "not assessable",
+			Errors:    []string{"domain does not exist"},
+		}, nil
 	}
 	if mxErr != nil {
 		r.Errors = append(r.Errors, fmt.Sprintf("MX DNS lookup failed: %v", mxErr))
@@ -184,7 +193,7 @@ func Assess(ctx context.Context, domain string, opts AssessmentOpts) (report.Rep
 			go func() { defer cwg.Done(); res.spf = CheckSPF(ctx, domain) }()
 			go func() { defer cwg.Done(); res.dmarc = CheckDMARC(ctx, domain) }()
 			go func() { defer cwg.Done(); res.dkim = CheckDKIM(ctx, domain, mxHosts) }()
-			go func() { defer cwg.Done(); res.mtasts = CheckMTASTS(ctx, domain, mxHosts) }()
+			go func() { defer cwg.Done(); res.mtasts = checkMTASTS(ctx, domain, mxHosts, opts.NoMTASTSFetch) }()
 			go func() { defer cwg.Done(); res.tlsrpt = CheckTLSRPT(ctx, domain) }()
 			go func() { defer cwg.Done(); res.dane = CheckDANE(ctx, domain, mxHosts) }()
 			go func() { defer cwg.Done(); res.dnssec = CheckDNSSEC(ctx, domain) }()
@@ -215,6 +224,9 @@ func Assess(ctx context.Context, domain string, opts AssessmentOpts) (report.Rep
 		}
 		r.Errors = append(r.Errors, res.errs...)
 		applyPostFanInEnrichment(&r)
+		applyMailDomainStatus(&r)
+		bimiRes := CheckBIMI(ctx, domain, r.DMARC)
+		r.BIMI = &bimiRes
 	case <-ctx.Done():
 		r.Errors = append(r.Errors, fmt.Sprintf("assessment timed out or cancelled: %v", ctx.Err()))
 	}
@@ -227,6 +239,11 @@ func Assess(ctx context.Context, domain string, opts AssessmentOpts) (report.Rep
 	r.ApplicableMax = ComputeApplicableMax(r)
 	r.Score = ComputeScore(r)
 	PopulateProfileFields(&r)
+	if r.Profile == ProfileNXDOMAIN {
+		r.Band = ""
+	} else {
+		r.Band = report.Band(r.Score)
+	}
 	r.DNSTrace = dnsTrace.snapshot()
 
 	return r, nil

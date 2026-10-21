@@ -46,8 +46,18 @@ func Check(ctx context.Context, req Request, deps Deps) report.DNSSECResult {
 		}
 	}
 
-	res.ResolverAD = ProbeAD(ctx, domain, deps.DNS)
-	res.AD = res.ResolverAD
+	observed, unavailable := ProbeAD(ctx, domain, deps.DNS)
+	if unavailable {
+		res.ADCheck = report.ADCheckNA
+	} else {
+		res.ResolverAD = observed
+		res.AD = observed
+		if observed {
+			res.ADCheck = report.ADCheckObserved
+		} else {
+			res.ADCheck = report.ADCheckAbsent
+		}
+	}
 
 	EnrichRecommendations(&res)
 	ApplyStatus(&res)

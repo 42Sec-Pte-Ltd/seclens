@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 
+	"seclens/internal/assessor/bimi"
 	"seclens/internal/assessor/rfc4035"
 	"seclens/internal/assessor/rfc6376"
 	"seclens/internal/assessor/rfc7208"
@@ -22,6 +23,7 @@ func (stdGate) Allowed(domain string) bool    { return IsAllowedDomain(domain) }
 
 // Compile-time checks that stdGate matches each RFC Gate surface we use.
 var (
+	_ bimi.Gate    = stdGate{}
 	_ rfc4035.Gate = stdGate{}
 	_ rfc6376.Gate = stdGate{}
 	_ rfc7489.Gate = stdGate{}
@@ -62,21 +64,27 @@ func (mtastsDNS) ResolveHostIPs(ctx context.Context, host string) ([]net.IP, err
 	return DefaultClient.resolveHostIPs(ctx, host)
 }
 
-var _ rfc8461.DNS = mtastsDNS{}
+var (
+	_ rfc8461.DNS = mtastsDNS{}
+	_ bimi.DNS    = mtastsDNS{}
+)
 
 type mtastsIPGuard struct{}
 
-func (mtastsIPGuard) PublicIPs(ips []net.IP) []net.IP  { return publicIPs(ips) }
+func (mtastsIPGuard) PublicIPs(ips []net.IP) []net.IP { return publicIPs(ips) }
 func (mtastsIPGuard) IsPrivateOrLocal(ip net.IP) bool { return isPrivateOrLocalIP(ip) }
 
-var _ rfc8461.IPGuard = mtastsIPGuard{}
+var (
+	_ rfc8461.IPGuard = mtastsIPGuard{}
+	_ bimi.IPGuard    = mtastsIPGuard{}
+)
 
 // rrMeta maps assessor DoH results into an RFC package's RR/QueryResult shape.
 func lookupRRMeta[R any, Q any](
 	ctx context.Context,
 	name string,
 	qtype uint16,
-	newQ func(ad bool, status int, rrs []R) Q,
+	newQ func(ad bool, unavailable bool, status int, rrs []R) Q,
 	newR func(name string, typ uint16, data string, ttl int) R,
 ) (Q, error) {
 	qr, err := DefaultClient.LookupRRWithMeta(ctx, name, qtype)
@@ -88,15 +96,15 @@ func lookupRRMeta[R any, Q any](
 	for _, rr := range qr.RRs {
 		rrs = append(rrs, newR(rr.Name, rr.Type, rr.Data, rr.TTL))
 	}
-	return newQ(qr.AD, qr.Status, rrs), nil
+	return newQ(qr.AD, qr.ADUnavailable || !resolverReportsAD(), qr.Status, rrs), nil
 }
 
 type dnssecDNS struct{}
 
 func (dnssecDNS) LookupRRWithMeta(ctx context.Context, name string, qtype uint16) (rfc4035.QueryResult, error) {
 	return lookupRRMeta(ctx, name, qtype,
-		func(ad bool, status int, rrs []rfc4035.RR) rfc4035.QueryResult {
-			return rfc4035.QueryResult{AD: ad, Status: status, RRs: rrs}
+		func(ad bool, unavailable bool, status int, rrs []rfc4035.RR) rfc4035.QueryResult {
+			return rfc4035.QueryResult{AD: ad, ADUnavailable: unavailable, Status: status, RRs: rrs}
 		},
 		func(name string, typ uint16, data string, ttl int) rfc4035.RR {
 			return rfc4035.RR{Name: name, Type: typ, Data: data, TTL: ttl}
@@ -110,7 +118,7 @@ type daneDNS struct{}
 
 func (daneDNS) LookupRRWithMeta(ctx context.Context, name string, qtype uint16) (rfc7672.QueryResult, error) {
 	return lookupRRMeta(ctx, name, qtype,
-		func(ad bool, status int, rrs []rfc7672.RR) rfc7672.QueryResult {
+		func(ad bool, _ bool, status int, rrs []rfc7672.RR) rfc7672.QueryResult {
 			return rfc7672.QueryResult{AD: ad, Status: status, RRs: rrs}
 		},
 		func(name string, typ uint16, data string, ttl int) rfc7672.RR {

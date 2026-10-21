@@ -71,7 +71,7 @@ func TestCheck_DNSSEC_DSWithResolverADWarnWithoutDNSKEY(t *testing.T) {
 	dns := &mockDNS{answers: map[string]map[uint16]QueryResult{
 		"com": {qtypeDS: {RRs: []RR{{Data: "2371 13 2 AABBCCDDEEFF00112233445566778899AABBCCDDEEFF00112233445566778899"}}}},
 		domain: {
-			qtypeDS: {AD: true, RRs: []RR{{Data: "2371 13 2 E9D6FAE1DAD409B0EE20831B6B70C03C773E41A8"}}},
+			qtypeDS:  {AD: true, RRs: []RR{{Data: "2371 13 2 E9D6FAE1DAD409B0EE20831B6B70C03C773E41A8"}}},
 			qtypeTXT: {AD: true, RRs: []RR{{Data: "v=spf1 -all"}}},
 		},
 	}}
@@ -89,7 +89,7 @@ func TestCheck_DNSSEC_DSOnlyWarn(t *testing.T) {
 	dns := &mockDNS{answers: map[string]map[uint16]QueryResult{
 		"com": {qtypeDS: {RRs: []RR{{Data: "2371 13 2 AABBCCDDEEFF00112233445566778899AABBCCDDEEFF00112233445566778899"}}}},
 		domain: {
-			qtypeDS: {RRs: []RR{{Data: "2371 13 2 E9D6FAE1DAD409B0EE20831B6B70C03C773E41A8"}}},
+			qtypeDS:  {RRs: []RR{{Data: "2371 13 2 E9D6FAE1DAD409B0EE20831B6B70C03C773E41A8"}}},
 			qtypeTXT: {AD: false},
 		},
 	}}
@@ -113,13 +113,40 @@ func TestCheck_DNSSEC_TLDUnsupported(t *testing.T) {
 	}
 }
 
+func TestCheck_DNSSEC_ADUnavailableDoesNotFail(t *testing.T) {
+	domain := "signed.example.com"
+	dns := &mockDNS{answers: map[string]map[uint16]QueryResult{
+		"com": {
+			qtypeDS: {RRs: []RR{{Data: "2371 13 2 AABBCCDDEEFF00112233445566778899AABBCCDDEEFF00112233445566778899"}}},
+		},
+		domain: {
+			qtypeDS:     {RRs: []RR{{Data: "2371 13 2 E9D6FAE1DAD409B0EE20831B6B70C03C773E41A8"}}},
+			qtypeDNSKEY: {RRs: []RR{{Data: "257 3 13 AwEAAc6h7Rfk3A1D0u1i0vYrK8mH3uG8o0o0o0o0o0o0o0o0o0o0o0o0o0o0"}}},
+			qtypeTXT:    {ADUnavailable: true, RRs: []RR{{Data: "v=spf1 -all"}}},
+		},
+	}}
+	res := Check(context.Background(), Request{Domain: domain}, Deps{DNS: dns, Gate: allowGate{}})
+	if res.Status != "pass" || res.ADCheck != "n/a" || res.ResolverAD {
+		t.Fatalf("status=%s adCheck=%s ad=%v", res.Status, res.ADCheck, res.ResolverAD)
+	}
+	if !res.FullyValidated() {
+		t.Fatal("DS+DNSKEY with AD n/a should count as validated")
+	}
+	for _, issue := range res.Issues {
+		if strings.Contains(issue, "did not return AD") {
+			t.Fatalf("AD n/a must not be an issue: %v", res.Issues)
+		}
+	}
+}
+
 func TestProbeAD(t *testing.T) {
 	dns := &mockDNS{answers: map[string]map[uint16]QueryResult{
 		"example.com": {
 			qtypeTXT: {AD: true},
 		},
 	}}
-	if !ProbeAD(context.Background(), "example.com", dns) {
+	ad, unavailable := ProbeAD(context.Background(), "example.com", dns)
+	if unavailable || !ad {
 		t.Fatal("expected AD from TXT probe")
 	}
 }

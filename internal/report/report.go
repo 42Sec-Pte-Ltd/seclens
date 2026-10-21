@@ -35,9 +35,21 @@ type Report struct {
 	TLSRPT *TLSRPTResult
 	DANE   *DANEResult
 	DNSSEC *DNSSECResult
+	// BIMI is informational. ComputeScore and ComputeApplicableMax ignore it.
+	BIMI *BIMIResult `json:"BIMI,omitempty"`
 
 	Errors []string
-	Score  int // 0-100 rough
+	Score  int // 0-100 rough. Omitted from JSON when Status is nxdomain.
+
+	// Band is Excellent, Good, Fair, or Poor from the public grade thresholds.
+	// Empty when the name is not assessable.
+	Band string `json:"band,omitempty"`
+
+	// Status is set only when the domain cannot be assessed.
+	// "nxdomain" means the name does not exist. Score and band are then absent.
+	Status string `json:"status,omitempty"`
+	// Message is the short reason for Status, for example "not assessable".
+	Message string `json:"message,omitempty"`
 
 	// Listing selects public surface lifetime.
 	// ListingCorpus (or empty on legacy disk): durable corpus; no deep-link TTL.
@@ -88,7 +100,22 @@ type DNSProviderTrace struct {
 // PrintText renders a human-friendly report (used for default "text" output).
 func (r Report) PrintText(w io.Writer) {
 	fmt.Fprintf(w, "\n=== %s ===\n", r.Domain)
-	fmt.Fprintf(w, "Generated: %s | Mail enabled: %v\n\n", r.Generated.Format(time.RFC3339), r.IsMailEnabled)
+	if r.Status == StatusNXDOMAIN || r.Profile == StatusNXDOMAIN {
+		fmt.Fprintln(w, "Status: nxdomain (not assessable)")
+		if r.Message != "" {
+			fmt.Fprintf(w, "%s\n", r.Message)
+		}
+		for _, e := range r.Errors {
+			fmt.Fprintf(w, "  ! %s\n", e)
+		}
+		fmt.Fprintln(w)
+		return
+	}
+	if r.Band != "" {
+		fmt.Fprintf(w, "Generated: %s | Mail enabled: %v | Score: %d | Band: %s\n\n", r.Generated.Format(time.RFC3339), r.IsMailEnabled, r.Score, r.Band)
+	} else {
+		fmt.Fprintf(w, "Generated: %s | Mail enabled: %v\n\n", r.Generated.Format(time.RFC3339), r.IsMailEnabled)
+	}
 
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "Check\tStatus\tSummary")
@@ -125,6 +152,34 @@ func (r Report) PrintText(w io.Writer) {
 
 	_ = tw.Flush()
 
+	if r.BIMI != nil {
+		fmt.Fprintln(w, "\nBIMI (informational, not scored)")
+		fmt.Fprintf(w, "  Status: %s\n", r.BIMI.Status)
+		if r.BIMI.DNSName != "" {
+			fmt.Fprintf(w, "  Record: %s\n", r.BIMI.DNSName)
+		}
+		if r.BIMI.Message != "" {
+			fmt.Fprintf(w, "  Summary: %s\n", r.BIMI.Message)
+		}
+		if r.BIMI.Location != "" {
+			fmt.Fprintf(w, "  l=: %s\n", r.BIMI.Location)
+		}
+		if r.BIMI.Evidence != "" {
+			fmt.Fprintf(w, "  a=: %s\n", r.BIMI.Evidence)
+		}
+		if logo := r.BIMI.Logo; logo != nil && logo.Error == "" {
+			fmt.Fprintf(w, "  Logo: %s, %d bytes, svg=%t, tiny-ps=%t, version1.2=%t, title=%t, script=%t\n",
+				logo.ContentType, logo.Bytes, logo.StartsWithSVG, logo.BaseProfileTinyPS, logo.Version12, logo.HasTitle, logo.HasScript)
+		}
+		if cert := r.BIMI.Certificate; cert != nil && cert.Error == "" {
+			fmt.Fprintf(w, "  Cert: subject=%s issuer=%s notAfter=%s expired=%t logotype=%t eku=%t hint=%s\n",
+				cert.Subject, cert.Issuer, cert.NotAfter, cert.Expired, cert.LogotypeExt, cert.BIMIEKU, cert.MarkHint)
+		}
+		for _, f := range r.BIMI.Findings {
+			fmt.Fprintf(w, "  - %s\n", f)
+		}
+	}
+
 	// Issues section - direct and simple (no fancy interface tricks)
 	hasIssues := false
 	printIssue := func(issues []string) {
@@ -157,6 +212,57 @@ func (r Report) PrintText(w io.Writer) {
 		}
 	}
 	fmt.Fprintln(w)
+}
+
+const (
+	// StatusNXDOMAIN is Report.Status when the name does not exist.
+	StatusNXDOMAIN = "nxdomain"
+
+	// Policy fetch outcomes on MTASTSResult.PolicyFetch.
+	PolicyFetchFetched    = "fetched"
+	PolicyFetchFailed     = "failed"
+	PolicyFetchNotFetched = "not fetched"
+
+	// AD-bit check outcomes on DNSSECResult.ADCheck.
+	ADCheckObserved = "observed"
+	ADCheckAbsent   = "absent"
+	ADCheckNA       = "n/a"
+)
+
+// Band maps a 0-100 score to the public grade label.
+// Excellent is 90 and above, Good is 70 and above, Fair is 40 and above, Poor is the rest.
+func Band(score int) string {
+	switch {
+	case score >= 90:
+		return "Excellent"
+	case score >= 70:
+		return "Good"
+	case score >= 40:
+		return "Fair"
+	default:
+		return "Poor"
+	}
+}
+
+// MarshalJSON omits Score and ApplicableMax for a name that does not exist.
+// A zero score would otherwise be read as a failed assessment.
+func (r Report) MarshalJSON() ([]byte, error) {
+	type alias Report
+	if r.Status != StatusNXDOMAIN && r.Profile != StatusNXDOMAIN {
+		return json.Marshal(alias(r))
+	}
+	raw, err := json.Marshal(alias(r))
+	if err != nil {
+		return nil, err
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, err
+	}
+	delete(m, "Score")
+	delete(m, "ApplicableMax")
+	delete(m, "band")
+	return json.Marshal(m)
 }
 
 // statusLabel maps a check status to the text-report marker.
@@ -277,18 +383,21 @@ type DKIMResult struct {
 
 // MTASTSResult ...
 type MTASTSResult struct {
-	DNSAdvertised     bool
-	PolicyFetched     bool
-	RawDNSTXT         string
-	RawPolicy         string
-	Version           string
-	Mode              string // enforce, testing, none
-	MXPatterns        []string
-	MaxAge            int
-	MXCoverageOK      bool
-	PolicyID          string // id= from _mta-sts DNS TXT (RFC 8461 §3.1)
-	DNSIDValid        bool   // id= matches RFC 8461 ABNF (1*32 ALPHA/DIGIT)
-	PolicySyntaxOK    bool   // version/mode/max_age/mx per RFC 8461 §3.2
+	DNSAdvertised  bool
+	PolicyFetched  bool
+	RawDNSTXT      string
+	RawPolicy      string
+	Version        string
+	Mode           string // enforce, testing, none
+	MXPatterns     []string
+	MaxAge         int
+	MXCoverageOK   bool
+	PolicyID       string // id= from _mta-sts DNS TXT (RFC 8461 §3.1)
+	DNSIDValid     bool   // id= matches RFC 8461 ABNF (1*32 ALPHA/DIGIT)
+	PolicySyntaxOK bool   // version/mode/max_age/mx per RFC 8461 §3.2
+	// PolicyFetch is "fetched", "failed", or "not fetched".
+	// Empty when MTA-STS is not advertised, so there is nothing to fetch.
+	PolicyFetch       string `json:"policyFetch,omitempty"`
 	RecommendedPolicy string // RFC 8461 Appendix A style policy body for deployment
 	RecommendedDNSTXT string // paired _mta-sts TXT recommendation (id= only in DNS)
 	Issues            []string
@@ -317,11 +426,14 @@ type DNSSECResult struct {
 	DSRecords     []string // raw DS RDATA strings
 	AD            bool     // resolver AD bit (same as ResolverAD; legacy JSON field)
 	ResolverAD    bool     // AD bit from DoH resolver on probe lookup
-	SyntaxOK      bool     // all published DS records parse cleanly
-	TLDSupported  bool     // false when parent TLD does not publish DS/DNSKEY
-	Issues        []string
-	Status        string
-	Message       string
+	// ADCheck is "observed", "absent", or "n/a".
+	// "n/a" means the resolver does not validate, so a missing AD bit is not a failure.
+	ADCheck      string `json:"adCheck,omitempty"`
+	SyntaxOK     bool   // all published DS records parse cleanly
+	TLDSupported bool   // false when parent TLD does not publish DS/DNSKEY
+	Issues       []string
+	Status       string
+	Message      string
 
 	EarnedPoints int // per-check score contribution (0–MaxPoints)
 	MaxPoints    int // maximum points for this check (DNSSEC=10 mail / 15 null_mx)
@@ -332,6 +444,9 @@ type DNSSECResult struct {
 func (d *DNSSECResult) FullyValidated() bool {
 	if d == nil || !d.DSPresent || !d.DNSKEYPresent {
 		return false
+	}
+	if d.ADCheck == ADCheckNA {
+		return true
 	}
 	return d.ResolverAD || d.AD
 }
@@ -376,4 +491,47 @@ type TLSRPTResult struct {
 
 	EarnedPoints int // per-check score contribution (0–MaxPoints)
 	MaxPoints    int // maximum points for this check (TLS-RPT=10)
+}
+
+// BIMIResult is the informational BIMI assessment (draft-brand-indicators-for-message-identification).
+// It has no point fields. Status is present, declined, absent, or invalid.
+type BIMIResult struct {
+	Status      string
+	Message     string
+	DNSName     string
+	Queried     []string
+	Raw         string
+	Version     string
+	Location    string
+	Evidence    string
+	Declined    bool
+	SyntaxOK    bool
+	Logo        *BIMILogo
+	Certificate *BIMICert
+	Findings    []string
+}
+
+// BIMILogo is a size-capped fetch of the l= document plus SVG Tiny PS hints.
+type BIMILogo struct {
+	ContentType       string
+	Bytes             int
+	StartsWithSVG     bool
+	BaseProfileTinyPS bool
+	Version12         bool
+	HasTitle          bool
+	HasScript         bool
+	Error             string
+}
+
+// BIMICert is a parse of the first PEM certificate at a=.
+// MarkHint is vmc, cmc, or bimi-eku. Empty means no BIMI EKU and no markType.
+type BIMICert struct {
+	Subject     string
+	Issuer      string
+	NotAfter    string
+	Expired     bool
+	LogotypeExt bool
+	BIMIEKU     bool
+	MarkHint    string
+	Error       string
 }

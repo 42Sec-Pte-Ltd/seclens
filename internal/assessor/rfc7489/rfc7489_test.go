@@ -127,6 +127,14 @@ func TestAnalyzeRaw(t *testing.T) {
 			wantIssues: 2,
 		},
 		{
+			name:       "reject with sp=none",
+			raw:        "v=DMARC1; p=reject; sp=none; rua=mailto:dmarc@example.com",
+			wantStatus: "warn",
+			wantPolicy: "reject",
+			wantSyntax: true,
+			wantIssues: 1,
+		},
+		{
 			name:       "reject with sp=reject",
 			raw:        "v=DMARC1; p=reject; sp=reject; rua=mailto:dmarc@example.com",
 			wantStatus: "pass",

@@ -29,6 +29,14 @@ const (
 	MaxPointsNullMXRecordNoDNSSEC = 30
 	MaxPointsNullMXSPFNoDNSSEC    = 30
 	MaxPointsNullMXDMARCNoDNSSEC  = 40
+
+	// PointsDMARCSPNone is deducted when p=reject or p=quarantine and sp=none.
+	// RFC 7489 applies p= to subdomains when sp= is absent. Explicit sp=none
+	// leaves every subdomain unenforced while the organizational name enforces.
+	// Five points records that hole. The apex policy is still enforcing, so this
+	// is not a full DMARC failure. The same five points come off the mail
+	// bucket and the no-mail reject bucket. The result is never below 0.
+	PointsDMARCSPNone = 5
 )
 
 const dnssecNotApplicableMessage = "DNSSEC not applicable (TLD does not support DNSSEC)"
@@ -36,7 +44,7 @@ const dnssecNotApplicableMessage = "DNSSEC not applicable (TLD does not support 
 // effectiveProfile returns the scoring profile, inferring from MX records for legacy reports.
 func effectiveProfile(r report.Report) string {
 	switch r.Profile {
-	case ProfileMail, ProfileNullMX, ProfileNoMX:
+	case ProfileMail, ProfileNullMX, ProfileNoMX, ProfileNXDOMAIN:
 		return r.Profile
 	}
 	// Prefer explicit MX set when present.
@@ -231,7 +239,7 @@ func scoreSPFStrictNullMX(spf *report.SPFResult, max int) (earned, maxOut int) {
 
 func scoreDMARCNullMX(dmarc *report.DMARCResult, max int) (earned, maxOut int) {
 	if dmarc != nil && dmarc.SyntaxOK && dmarc.Policy == "reject" {
-		return max, max
+		return deductSPNone(max, dmarc), max
 	}
 	return 0, max
 }
@@ -296,7 +304,9 @@ func scoreSPF(spf *report.SPFResult) (earned, max int) {
 	return earned, max
 }
 
-// DMARC points from p= (sp= informational); invalid syntax ⇒ 0.
+// DMARC points from p=. Invalid syntax scores 0.
+// p=reject or p=quarantine with sp=none deducts PointsDMARCSPNone, floored at 0.
+// Other sp= values do not change points.
 // Full 25/15 requires the policy to apply to 100% of mail (pct omitted or 100).
 // Lower pct scales: int(math.Round(base * pct / 100)). Null-MX uses scoreDMARCNullMX.
 func scoreDMARC(dmarc *report.DMARCResult) (earned, max int) {
@@ -314,13 +324,29 @@ func scoreDMARC(dmarc *report.DMARCResult) (earned, max int) {
 		return 0, max
 	}
 	pct := effectiveDMARCPct(dmarc)
-	if pct >= 100 {
-		return base, max
+	switch {
+	case pct >= 100:
+		earned = base
+	case pct <= 0:
+		earned = 0
+	default:
+		earned = int(math.Round(float64(base) * float64(pct) / 100.0))
 	}
-	if pct <= 0 {
-		return 0, max
+	return deductSPNone(earned, dmarc), max
+}
+
+func deductSPNone(earned int, dmarc *report.DMARCResult) int {
+	if dmarc == nil || dmarc.SubPolicy != "none" {
+		return earned
 	}
-	return int(math.Round(float64(base) * float64(pct) / 100.0)), max
+	if dmarc.Policy != "reject" && dmarc.Policy != "quarantine" {
+		return earned
+	}
+	earned -= PointsDMARCSPNone
+	if earned < 0 {
+		return 0
+	}
+	return earned
 }
 
 // effectiveDMARCPct is the RFC 7489 pct applied to mail-profile scoring.

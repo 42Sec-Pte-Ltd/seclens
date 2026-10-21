@@ -19,7 +19,7 @@ func EnrichRecommendations(res *report.DNSSECResult) {
 	if !res.DNSKEYPresent {
 		res.Issues = append(res.Issues, "DS record present but no DNSKEY at zone apex — incomplete DNSSEC chain")
 	}
-	if res.DSPresent && res.DNSKEYPresent && !resolverValidated(res) {
+	if res.DSPresent && res.DNSKEYPresent && res.ADCheck != report.ADCheckNA && !resolverValidated(res) {
 		res.Issues = append(res.Issues, "resolver did not return AD (Authenticated Data) — SecLens observed no AD bit and does not perform its own cryptographic chain validation")
 	}
 	for _, raw := range res.DSRecords {
