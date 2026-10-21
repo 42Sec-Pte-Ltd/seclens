@@ -17,7 +17,7 @@ import (
 	"seclens/internal/report"
 )
 
-const version = "0.1.0"
+const version = "0.2.0"
 
 var (
 	flagConcurrency = flag.Int("concurrency", 10, "Maximum number of domains to assess in parallel")
