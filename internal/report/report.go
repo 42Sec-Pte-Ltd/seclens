@@ -53,7 +53,8 @@ type Report struct {
 
 	// Listing selects public surface lifetime.
 	// ListingCorpus (or empty on legacy disk): durable corpus; no deep-link TTL.
-	// ListingEphemeral: API public scan; detail and summary honor publicResultTTL.
+	// ListingEphemeral: API public scan. /api/result and /api/history honor
+	// publicResultTTL. The Global Pulse summary keeps the finished row.
 	Listing string `json:"listing,omitempty"`
 
 	// DNSTrace records every DoH query of this assessment with the raw JSON answers
