@@ -130,7 +130,7 @@ func (c *DoHClient) doOneQueryAttempt(ctx context.Context, baseURL, name string,
 		return nil, nil, err
 	}
 	req.Header.Set("Accept", "application/dns-json")
-	req.Header.Set("User-Agent", "seclens/0.1 (+https://github.com/seclens-one/seclens; email-security-assessor)")
+	req.Header.Set("User-Agent", "seclens/0.1 (+https://github.com/42Sec-Pte-Ltd/seclens; email-security-assessor)")
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {

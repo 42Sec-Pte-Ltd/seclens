@@ -8,7 +8,7 @@ This repository publishes the SecLens email/domain security assessor CLI. The la
 
 Please report security issues **privately** via GitHub Security Advisories for this repository:
 
-https://github.com/seclens-one/seclens/security/advisories/new
+https://github.com/42Sec-Pte-Ltd/seclens/security/advisories/new
 
 Do not open public issues for unfixed vulnerabilities.
 

@@ -113,7 +113,7 @@ func fetchPolicy(ctx context.Context, deps Deps, domain string) (policyFetchResu
 	if err != nil {
 		return policyFetchResult{}, err
 	}
-	req.Header.Set("User-Agent", "seclens/0.1 (+https://github.com/seclens-one/seclens; email-security-assessor)")
+	req.Header.Set("User-Agent", "seclens/0.1 (+https://github.com/42Sec-Pte-Ltd/seclens; email-security-assessor)")
 
 	client := strictHTTPClient(8*time.Second, policyTransport(deps, policyDomain))
 	resp, err := client.Do(req)

@@ -1,0 +1,1 @@
+{"name":"seclens-mcp","version":"1.0.0","description":"Assess any domain's email security across SPF, DMARC, DKIM, MTA-STS, DNSSEC, DANE, and TLS-RPT.","mcpServers":{"seclens":{"httpUrl":"https://seclens.one/mcp"}}}
